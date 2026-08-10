@@ -5,7 +5,12 @@ from pathlib import Path
 
 from alpagym_host.config import SeparateNodesSlurmTopologyConfig, SlurmConfig
 from alpagym_host.run_topology import RunHostPlan, RunTopologyPlan
-from alpagym_host.slurm import _gpu_mask, build_cosmos_srun_command, build_wizard_srun_command
+from alpagym_host.slurm import (
+    _cosmos_launcher_script,
+    _gpu_mask,
+    build_cosmos_srun_command,
+    build_wizard_srun_command,
+)
 
 
 def test_build_wizard_srun_command_uses_slurm_gpu_binding_without_cuda_mask() -> None:
@@ -99,8 +104,8 @@ def test_build_wizard_srun_command_keeps_default_cpu_binding_for_exclusive_step(
     assert "--cpu-bind=none" not in command
 
 
-def test_build_cosmos_srun_command_passes_worker_flags_to_cosmos_launcher() -> None:
-    """Cosmos multi-worker flags appear before the entrypoint script argument."""
+def test_build_cosmos_srun_command_dispatches_per_task_to_the_posttrain_entry() -> None:
+    """Each SLURM_PROCID branch execs its own prebuilt command for the closed-loop entry."""
     topology = RunTopologyPlan(
         hosts=(
             RunHostPlan(
@@ -141,50 +146,40 @@ def test_build_cosmos_srun_command_passes_worker_flags_to_cosmos_launcher() -> N
                 "run",
                 "python",
                 "-m",
-                "cosmos_rl.launcher.launch_all",
-                "--config",
-                "/tmp/cosmos.toml",
-                "--num-workers",
-                "2",
-                "--worker-idx",
-                "0",
-                "--port",
-                "29500",
-                "alpagym_runtime.cosmos.entrypoint",
+                "projects.cosmos3.posttrain.entrypoints.alpagym_clrl",
+                "--resolved-config",
+                "/tmp/resolved_config.yaml",
+                "--gpus",
+                "4",
             ],
             [
                 "uv",
                 "run",
                 "python",
                 "-m",
-                "cosmos_rl.launcher.launch_all",
-                "--config",
-                "/tmp/cosmos.toml",
-                "--num-workers",
-                "2",
-                "--worker-idx",
-                "1",
-                "--url",
-                "policy-0:29500",
-                "alpagym_runtime.cosmos.entrypoint",
+                "projects.cosmos3.posttrain.entrypoints.alpagym_clrl",
+                "--resolved-config",
+                "/tmp/resolved_config.yaml",
+                "--gpus",
+                "4",
             ],
         ),
         log_dir=Path("/tmp/alpagym/logs"),
     )
 
     script = command[-1]
+    # PYTHONPATH is settled BEFORE the sync: this runs under `bash -lc`, so the login shell has
+    # already run and anything it left on PYTHONPATH would otherwise be inherited.
     assert script.startswith(
-        "uv sync --frozen --inexact --all-packages --project /workspace/alpagym\n"
+        "unset PYTHONPATH\nuv sync --frozen --inexact --all-packages --project /workspace/alpagym\n"
     )
-    script = command[-1].split("  1)", maxsplit=1)[1].split("    ;;", maxsplit=1)[0]
-    entrypoint_index = script.index("alpagym_runtime.cosmos.entrypoint")
+    branch = script.split("  1)", maxsplit=1)[1].split("    ;;", maxsplit=1)[0]
     for expected_arg in (
-        "--num-workers 2",
-        "--worker-idx 1",
-        "--url policy-0:29500",
+        "-m projects.cosmos3.posttrain.entrypoints.alpagym_clrl",
+        "--resolved-config /tmp/resolved_config.yaml",
+        "--gpus 4",
     ):
-        assert expected_arg in script
-        assert script.index(expected_arg) < entrypoint_index
+        assert expected_arg in branch
     assert "--gpu-bind=mask_gpu:0xf" in command
     assert "ALPAGYM_WORKER_INDEX" not in command[-1]
 
@@ -213,3 +208,29 @@ def _slurm_config(*, exclusive: bool = True) -> SlurmConfig:
         export_env=["UV_CACHE_DIR=/tmp/uv"],
         topology=SeparateNodesSlurmTopologyConfig(cosmos_nodes=2, alpasim_nodes=1),
     )
+
+
+def test_posttrain_repo_root_is_assigned_to_pythonpath() -> None:
+    """PYTHONPATH is ASSIGNED, never appended to.
+
+    The Cosmos step runs under `bash -lc`, so the login shell has already run; a checkout leaking
+    in that way once shadowed the pinned cosmos-rl revision (see ALPAGYM_RUNBOOK.md). Appending
+    would reopen exactly that door, and `srun --export` cannot win against the login shell either
+    -- which is why this is set in the script rather than in `export_env`.
+    """
+    script = _cosmos_launcher_script(
+        workspace_sync_command=["uv", "sync"],
+        worker_commands=(["python", "-m", "projects.cosmos3.posttrain.entrypoints.alpagym_clrl"],),
+        posttrain_repo_root="/repo/imaginaire4",
+    )
+    assert script.startswith("export PYTHONPATH=/repo/imaginaire4\n")
+    assert "$PYTHONPATH" not in script
+
+
+def test_pythonpath_is_cleared_when_no_repo_root_is_configured() -> None:
+    """With no root configured the old behaviour stands: clear it rather than inherit it."""
+    script = _cosmos_launcher_script(
+        workspace_sync_command=["uv", "sync"],
+        worker_commands=(["python", "-m", "whatever"],),
+    )
+    assert script.startswith("unset PYTHONPATH\n")

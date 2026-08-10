@@ -492,6 +492,15 @@ class SlurmConfig:
     uv_cache_dir: str | None = None
     container_mounts: list[str] = field(default_factory=list)
     export_env: list[str] = field(default_factory=list)
+    # Repo root for `projects.cosmos3.posttrain`, as seen INSIDE the container. The closed-loop
+    # entry lives there and imports absolutely, so it must be on PYTHONPATH.
+    #
+    # This cannot ride in `export_env`: the Cosmos step runs under `bash -lc`, and a login shell
+    # that sets PYTHONPATH wins over `srun --export`. The launcher script therefore assigns it
+    # after the login shell has run. Assignment, not prepend -- a checkout leaking in from the
+    # environment once shadowed the pinned cosmos-rl revision (see the runbook), and appending
+    # would reintroduce exactly that.
+    posttrain_repo_root: str | None = None
     qos: str | None = None
     mem: str | None = None
     # Requeue the job on the pre-timeout SIGUSR1 and resume from the latest

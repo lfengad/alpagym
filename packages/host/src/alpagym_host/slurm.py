@@ -120,6 +120,7 @@ def build_cosmos_srun_command(
             _cosmos_launcher_script(
                 workspace_sync_command=workspace_sync_command,
                 worker_commands=worker_commands,
+                posttrain_repo_root=slurm.posttrain_repo_root,
             ),
         ]
     )
@@ -129,15 +130,30 @@ def build_cosmos_srun_command(
 def _cosmos_launcher_script(
     workspace_sync_command: list[str],
     worker_commands: tuple[list[str], ...],
+    posttrain_repo_root: str | None = None,
 ) -> str:
     """Render the per-task dispatcher for one multi-task Cosmos Slurm step.
 
     `srun --ntasks=N` accepts one command template for the whole step, so all
     Cosmos tasks start the same shell script. Slurm assigns each task a distinct
     `SLURM_PROCID`; this wrapper uses that task id to exec the matching
-    prebuilt Cosmos launcher command.
+    prebuilt launcher command.
+
+    `PYTHONPATH` is ASSIGNED here, never appended to, and never left to the
+    environment. This runs under `bash -lc`, so the login shell has already run
+    and whatever it put on `PYTHONPATH` would otherwise win over `srun --export`.
+    A checkout leaking in that way once shadowed the pinned cosmos-rl revision.
+    Assigning the one path the entry needs -- the repo holding
+    `projects.cosmos3.posttrain`, which imports absolutely -- keeps that door shut;
+    with no root configured the variable is cleared outright.
     """
-    lines = [shlex.join(workspace_sync_command), 'case "$SLURM_PROCID" in']
+    lines = [
+        f"export PYTHONPATH={shlex.quote(posttrain_repo_root)}"
+        if posttrain_repo_root
+        else "unset PYTHONPATH",
+        shlex.join(workspace_sync_command),
+        'case "$SLURM_PROCID" in',
+    ]
     for worker_index, worker_command in enumerate(worker_commands):
         lines.extend(
             [

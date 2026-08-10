@@ -552,7 +552,7 @@ def test_cosmos_srun_command_disables_cpu_binding_for_nonexclusive_steps(
         ),
         container_image="/containers/alpagym.sqsh",
         workspace_sync_command=["true"],
-        worker_commands=(["python", "-m", "cosmos_rl.launcher.launch_all"],),
+        worker_commands=(["python", "-m", "projects.cosmos3.posttrain.entrypoints.alpagym_clrl"],),
         log_dir=tmp_path / "logs",
     )
 
@@ -583,7 +583,7 @@ def test_cosmos_srun_command_keeps_default_cpu_binding_for_exclusive_steps(
         ),
         container_image="/containers/alpagym.sqsh",
         workspace_sync_command=["true"],
-        worker_commands=(["python", "-m", "cosmos_rl.launcher.launch_all"],),
+        worker_commands=(["python", "-m", "projects.cosmos3.posttrain.entrypoints.alpagym_clrl"],),
         log_dir=tmp_path / "logs",
     )
 
@@ -613,7 +613,7 @@ def test_slurm_mem_is_requested_for_batch_and_container_step(tmp_path: Path) -> 
         slurm=slurm,
         container_image="/containers/alpagym.sqsh",
         workspace_sync_command=["true"],
-        worker_commands=(["python", "-m", "cosmos_rl.launcher.launch_all"],),
+        worker_commands=(["python", "-m", "projects.cosmos3.posttrain.entrypoints.alpagym_clrl"],),
         log_dir=tmp_path / "logs",
     )
     script = render_submit_script(
@@ -685,7 +685,7 @@ def test_submit_slurm_job_writes_script_and_calls_sbatch(
     assert "deploy=cluster" in script
     assert "topology=slurm_full_node_1_3_4" in script
     assert "alpasim_wizard" not in script
-    assert "cosmos_rl.launcher.launch_all" not in script
+    assert "projects.cosmos3.posttrain.entrypoints.alpagym_clrl" not in script
     assert subprocess_calls == [
         {
             "args": (["sbatch", str(artifact_paths.submit_script_path)],),

@@ -344,29 +344,25 @@ def _build_cosmos_command(
             config,
             project_root=alpagym_project_root(),
             no_sync=False,
-            worker_count=1,
-            worker_index=0,
-            controller_port=config.cosmos.launch.controller_port,
+            cosmos_gpus=topology.cosmos_host_plans[0].cosmos_gpus,
         )
 
     Path(config.execution.slurm.uv_cache_dir).mkdir(parents=True, exist_ok=True)
     cosmos_hosts = topology.cosmos_host_plans
-    controller_url = f"{cosmos_hosts[0].hostname}:{config.cosmos.launch.controller_port}"
-    worker_commands: list[list[str]] = []
-    for worker_index, _host in enumerate(cosmos_hosts):
-        worker_commands.append(
-            _build_cosmos_launcher_command(
-                config,
-                project_root=Path(config.execution.slurm.container_workdir),
-                no_sync=True,
-                controller_port=(
-                    config.cosmos.launch.controller_port if worker_index == 0 else None
-                ),
-                controller_url=controller_url if worker_index != 0 else None,
-                worker_count=len(cosmos_hosts),
-                worker_index=worker_index,
-            )
+    if len(cosmos_hosts) != 1:
+        raise NotImplementedError(
+            f"the posttrain entry runs on one host; got {len(cosmos_hosts)}. Multi-node needs a "
+            "Ray cluster stood up across the allocation (RAY_ADDRESS), which replaced cosmos-rl's "
+            "controller/worker addressing and is not built yet"
         )
+    worker_commands: list[list[str]] = [
+        _build_cosmos_launcher_command(
+            config,
+            project_root=Path(config.execution.slurm.container_workdir),
+            no_sync=True,
+            cosmos_gpus=cosmos_hosts[0].cosmos_gpus,
+        )
+    ]
     return build_cosmos_srun_command(
         cosmos_hosts=cosmos_hosts,
         slurm=config.execution.slurm,
@@ -410,15 +406,27 @@ def _build_cosmos_launcher_command(
     config: RunConfig,
     project_root: Path,
     no_sync: bool,
-    worker_count: int,
-    worker_index: int,
-    controller_port: int | None = None,
-    controller_url: str | None = None,
+    cosmos_gpus: int,
 ) -> list[str]:
-    """Build the Cosmos-RL launcher command."""
-    if controller_port is not None and controller_url is not None:
-        raise ValueError("Cosmos launcher command cannot set both port and url")
+    """Build the command that runs the closed-loop RL half of the run.
 
+    This is posttrain's `entrypoints.alpagym_clrl`, which replaced
+    `cosmos_rl.launcher.launch_all`. cosmos-rl's `--policy`/`--rollout`/`--num-workers`/
+    `--worker-idx`/`--port`/`--url` have no counterpart: those addressed its controller and worker
+    processes, and Ray does that now. The replica counts are likewise gone -- the entry derives
+    both meshes from `cosmos_gpus` (policy `(1, gpus)` FSDP, rollout `(gpus, 1)`).
+
+    `allowed_outdated_steps` is deliberately not passed. Trainer and rollout alternate, so every
+    trajectory is consumed at the step that produced it: on-policy is structural here, and a knob
+    whose only correct value is 0 would be a compatibility artifact for a code path that is gone.
+
+    Args:
+        config: the resolved run config; the entry re-reads it from disk inside each Ray actor.
+        project_root: the uv project to run from -- the checkout on the host, or the container
+            workdir under Slurm.
+        no_sync: skip uv's dependency sync (the Slurm step syncs once, before this command).
+        cosmos_gpus: GPUs available to the cosmos half of the node.
+    """
     command = ["uv", "run"]
     if no_sync:
         command.append("--no-sync")
@@ -430,32 +438,29 @@ def _build_cosmos_launcher_command(
     ]
     if no_sync:
         launcher_args.extend(["--package", "alpagym-runtime"])
+    group_size = int(config.cosmos.rollout.n_generation)
+    train_batch = int(config.cosmos.train.train_batch_per_replica)
+    if train_batch % group_size:
+        raise ValueError(
+            f"train_batch_per_replica={train_batch} is not a multiple of n_generation={group_size}; "
+            "a partial group would reach the group-relative advantage estimator and skew its "
+            "per-prompt mean and std"
+        )
     launcher_args.extend(
         [
             "python",
             "-m",
-            "cosmos_rl.launcher.launch_all",
-            "--config",
-            str(config.artifact_paths.cosmos_config_path),
-            "--policy",
-            str(config.cosmos.launch.policy_replicas),
-            "--rollout",
-            str(config.cosmos.launch.rollout_replicas),
-            "--num-workers",
-            str(worker_count),
-            "--worker-idx",
-            str(worker_index),
-        ]
-    )
-    if controller_port is not None:
-        launcher_args.extend(["--port", str(controller_port)])
-    if controller_url is not None:
-        launcher_args.extend(["--url", controller_url])
-    launcher_args.extend(
-        [
-            "--log-dir",
-            str(config.artifact_paths.log_dir),
-            "alpagym_runtime.cosmos.entrypoint",
+            "projects.cosmos3.posttrain.entrypoints.alpagym_clrl",
+            "--resolved-config",
+            str(config.artifact_paths.resolved_config_path),
+            "--gpus",
+            str(cosmos_gpus),
+            "--steps",
+            str(config.cosmos.train.max_num_steps),
+            "--prompts-per-step",
+            str(train_batch // group_size),
+            "--group-size",
+            str(group_size),
         ]
     )
     command.extend(launcher_args)

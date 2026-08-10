@@ -14,8 +14,20 @@ dependencies = [
   "flash-attn==2.8.3",
   "grpcio",
   "grouped-gemm @ git+https://github.com/fanshiqing/grouped_gemm@v1.1.4",
+  # `alpagym_runtime.posttrain` runs inside posttrain, which reaches i4 modules that these four
+  # satisfy: loguru (imaginaire.utils.log -- missing it also breaks lazy_config,
+  # cosmos3.utils.parallelism and posttrain.model.parallel_dims), iopath
+  # (imaginaire.lazy_config), imageio (imaginaire.utils.easy_io video handler), termcolor
+  # (cosmos-rl's WFM module discovery). `ray` is deliberately absent: cosmos-rl[rl] already
+  # brings it. `multi-storage-client` is deliberately absent too -- it would unlock i4's config
+  # root but moves protobuf 4.25.9 -> 7.35.1, and AlpaGym exchanges protobuf messages with the
+  # simulator on every one of an episode's 22 ticks.
+  "imageio",
+  "iopath",
+  "loguru",
   "nvidia-ml-py",
   "psutil",
+  "termcolor",
   "torch==2.8.0",
   "torchao>=0.10.0,<0.16.0",
   "torchaudio>=2.7.1",
