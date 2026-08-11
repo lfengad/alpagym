@@ -19,6 +19,7 @@ advantage across all of that episode's transitions.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable
 
 import torch
@@ -33,6 +34,9 @@ from alpagym_runtime.cosmos.replay_objective import (
     compute_kl_penalty,
     compute_ppo_surrogate,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 def make_alpagym_objective(
@@ -70,8 +74,11 @@ def make_alpagym_objective(
             "Set both to 0, or port the reference model first."
         )
 
+    _diag_done = False
+
     def score(model: Any, batch: list[Trajectory]) -> tuple[torch.Tensor, dict[str, Any]]:
         """Rescore every recorded action in ``batch`` and apply the clipped PPO surrogate."""
+        nonlocal _diag_done
         require_advantages(batch)
 
         rows = [transition for trajectory in batch for transition in trajectory.transitions]
@@ -110,6 +117,20 @@ def make_alpagym_objective(
         new = result["log_probs"]
         kl_div = result.get("kl_div")
         assert_replay_shapes(new, old, advantages, kl_div)
+
+        # One-shot sanity line. At step 0 the trainer rescores the rollout's own action with the
+        # same weights, so the raw (pre-clamp) log-ratio should be ~0 and the ratio ~1. It read
+        # -12.7 while uninitialized buffers went unnoticed -- the surrogate's clamp hides the size
+        # of any mismatch, and the run otherwise looks healthy.
+        if not _diag_done:
+            _diag_done = True
+            with torch.no_grad():
+                logger.info(
+                    "[alpagym] first-batch check: old=%.6g new=%.6g raw_log_ratio=%.6g",
+                    old.flatten()[0].item(),
+                    new.detach().flatten()[0].item(),
+                    (new.detach() - old).flatten()[0].item(),
+                )
 
         policy_loss, ratio = compute_ppo_surrogate(
             new,

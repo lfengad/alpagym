@@ -120,7 +120,17 @@ class AlpamayoTrainModel(nn.Module):
             }
             self.model._apply_fsdp2(dp_mesh, fsdp_config, build_reshard_fn("default"))
 
-        self.model.to_empty(device=device)
+        # Materialize like `HFModel._materialize_meta`, NOT with `to_empty`. `__init__` builds
+        # buffers REAL (`include_buffers=False`), so tensors such as RoPE `inv_freq` already hold
+        # their init-time values -- and `to_empty` would replace parameters AND buffers alike with
+        # uninitialized storage. The checkpoint then refills the parameters but not the buffers,
+        # which are computed rather than stored, leaving positional encodings as garbage: the model
+        # still runs, still produces finite log-probs, and is simply wrong. Empty only what is on
+        # meta; move everything else.
+        self.model._apply(
+            lambda t: torch.empty_like(t, device=device) if t.device.type == "meta" else t.to(device),
+            recurse=True,
+        )
         # None is a supported argument: the hook falls back to `hf_config._name_or_path`. It only
         # warms the HF auto-class registry.
         self.model.post_to_empty_hook(None)
