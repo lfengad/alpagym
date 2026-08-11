@@ -303,7 +303,50 @@ Never cancel the step holding the allocation (`sleep`), or `.extern`. That is us
 not always: any probe run before the allocation's own step registers takes `.0` and pushes `sleep`
 to `.1`. Read the `%j` column, don't assume the number.
 
+**Name the holder `sleep`, or the rule above stops working.** `~/run.sh` is interactive
+(`--pty bash -i`) and dies without a tty, so a non-interactive allocation needs its own holder.
+Start it as `srun ... sleep 14400`, NOT `srun ... bash -c 'sleep 14400'` — the latter registers
+under `%j` = `bash`, so a cleanup filter that spares `sleep` kills the allocation instead. Spare
+`.0` and `.extern` by step number as well as by name.
+
+**Cleanup must include the cosmos step, not just `alpasim-*`.** A failed run's Ray actors keep
+their GPU memory: after several aborted runs, GPU 0 held ~20 GiB across six leftover PIDs while
+`squeue` showed nothing obviously wrong. That memory then shows up inside the *next* run's OOM
+report as unattributed processes, which reads like the run's own footprint and sends you looking
+for a leak that isn't there. Confirm `nvidia-smi` reads ~0 MiB before trusting any memory
+measurement.
+
 ## Upstream Bugs Worth Reporting
+
+**Editing imaginaire4 kills a running job.** Ray stages the *alpagym* working directory, so edits
+there only affect the next run — but posttrain is imported straight off Lustre via `PYTHONPATH`,
+and actors read those files as they go. A mid-flight edit surfaces as an `ImportError` or
+`IndentationError` from a path under `imaginaire4/`, not as anything resembling a training fault.
+Sync posttrain changes between runs, never during one.
+
+**`srun` inside a `bash -s` heredoc eats the rest of the script.** It reads stdin, so every command
+after it silently never runs — the symptom is a truncated report, not an error. Give it
+`< /dev/null`.
+
+**AlpaSim — the Slurm deployment validates GPU ids in one frame and places services in
+another.** `services.py:283` checks every `gpus:` id against `context.get_num_gpus()`, which is
+`nvidia-smi --query-gpu=count` *inside the Wizard process* — so a Wizard step bound to half the
+node validates against `0..3`. Placement does not share that frame: the per-service
+`srun --overlap` the Wizard issues carries no GPU flag at all, inherits the whole allocation, and
+selects a device with `CUDA_VISIBLE_DEVICES=<id>`, an absolute index.
+
+Whether this bites depends on the site. `detect_gpus` shells out to `nvidia-smi`, which ignores
+`CUDA_VISIBLE_DEVICES` — so where Slurm does not constrain devices at the cgroup level it reports
+the whole node and the stock `gpus: [4,5,6,7]` validates fine. cw-dfw *does* constrain them
+(measured: `--gpu-bind=mask_gpu:0xf0` → `nvidia-smi --query-gpu=count` reports `4`, unbound
+reports `8`), so the two frames invert here: the ids that pass validation (`0..3`) are exactly
+the ones that land on the trainer's GPUs, and the ids that land correctly (`4..7`) are rejected
+before the run starts. The stock config has therefore never been runnable on this cluster.
+
+`build_wizard_srun_command` gives the Wizard step every GPU on the host so the frames agree,
+which reproduces the behaviour sites without device constraints get for free. The upstream fix
+is for the Wizard's per-service `srun` to carry the binding, or for `detect_gpus` to report the
+allocation rather than the calling process's view.
 
 **AlpaSim — `packages.find` drops subpackages.** `src/controller/pyproject.toml`
 and `src/runtime/pyproject.toml` both use:
