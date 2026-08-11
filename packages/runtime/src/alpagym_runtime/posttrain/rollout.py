@@ -252,9 +252,13 @@ class AlpagymRollout(WeightReceiverBase):
             for name, param in self.model.named_parameters()
         }
 
-    @property
     def weight_version(self) -> int:
-        """The training iteration whose weights this rollout currently holds."""
+        """The training iteration whose weights this rollout currently holds.
+
+        A method, not a property, to match `roles/rollout/vllm.py` and because the loop reads it
+        through a worker handle -- which invokes it remotely as a method, so a property would
+        resolve to an int and then fail to be called.
+        """
         return self._weight_version
 
     def shutdown(self) -> None:
