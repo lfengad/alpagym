@@ -36,6 +36,7 @@ here even when running the cosmos-rl mode.
 - [Why This Cluster Needs Adaptation](#why-this-cluster-needs-adaptation)
 - [Two Modes](#two-modes)
 - [Reading a Run](#reading-a-run)
+- [Running cosmos-rl from `main`](#running-cosmos-rl-from-main)
 - [Running the posttrain path](#running-the-posttrain-path)
 - [Troubleshooting](#troubleshooting)
 - [Upstream Bugs Worth Reporting](#upstream-bugs-worth-reporting)
@@ -223,11 +224,11 @@ GPUs, and the ids that land correctly (4-7) are rejected before the run starts.
 - **posttrain mode** — fixed. `build_wizard_srun_command` gives the Wizard step every
   GPU on the host, so validation and placement share one frame and stock `alpagym_4gpu`
   is correct. Verified: AlpaSim on 4-7, training alone on 0-3.
-- **cosmos-rl mode (`main`)** — not fixed there. Cherry-pick that `slurm.py` change, or
-  accept that the stock topology will not start. Do NOT "fix" it by renumbering the
-  topology to 0-3: that passes validation and silently runs the simulator on the
-  trainer's GPUs, which fits a single step and exhausts GPU 0 once the optimizer states
-  exist. See [Upstream Bugs](#upstream-bugs-worth-reporting).
+- **cosmos-rl mode (`main`)** — not fixed there; see
+  [Running cosmos-rl from `main`](#running-cosmos-rl-from-main) for what to carry over.
+  Do NOT "fix" it by renumbering the topology to 0-3: that passes validation and silently
+  runs the simulator on the trainer's GPUs, which fits a single step and exhausts GPU 0
+  once the optimizer states exist. See [Upstream Bugs](#upstream-bugs-worth-reporting).
 
 **`alpasim-base` cannot be built.** Four services (`driver`, `physics`,
 `trafficsim`, `controller`) use an image built from AlpaSim's Dockerfile;
@@ -352,6 +353,31 @@ where to start.
 On the smoke config an untuned policy scores around -9.4, which under
 `progress_safety` is roughly one collision (-10) plus a little progress. That is
 expected, not a bug.
+
+## Running cosmos-rl from `main`
+
+`main` predates every site adaptation in this document, so a cosmos-rl run here needs
+three things carried over from `posttrain-migration`. Two are files; the third is one
+hunk, not a whole file.
+
+| Carry over | Why | How |
+|---|---|---|
+| `packages/alpasim_configs/.../deploy/cw_dfw_slurm.yaml` | This cluster has no Docker, so `alpasim-base` cannot be built and the stock deploy presets do not apply. Without it AlpaSim does not come up at all. | `git checkout posttrain-migration -- <path>` |
+| `scripts/cw-dfw/run_alpagym_clrl.sh` | Composes every site override (paths, account, container image, redis mounts, GPU split). Drop the `posttrain_repo_root` line — `main` has no such config key. | same |
+| The Wizard GPU-visibility hunk in `packages/host/src/alpagym_host/slurm.py` | Without it the stock `alpagym_4gpu` topology fails the Wizard's id validation and the run never starts. | Copy the `--gpus-per-task` line and its comment ONLY. Do **not** take the whole file: it also carries the `export PYTHONPATH` that the posttrain entry needs and cosmos-rl does not. |
+
+One more hunk in `slurm.py` is **optional**: `_cosmos_launcher_script` now assigns
+`PYTHONPATH` (or clears it when no root is configured). The clearing half fixes the
+`PolicyStatusManager has no attribute` failure in
+[Troubleshooting](#troubleshooting) at its source, rather than by editing `~/.bashrc`.
+Take it or use the `~/.bashrc` workaround; do not do both halves without the config key,
+since `posttrain_repo_root` does not exist on `main`.
+
+Everything else on this branch is posttrain-only and must NOT be carried over:
+`run_lifecycle.py` (it replaces the cosmos-rl launcher outright and refuses multi-node),
+`config.py`'s `posttrain_repo_root`, and `packages/runtime/.../posttrain/`.
+
+`ALPAGYM_RUNBOOK.md` itself is also only on this branch. Read it from here.
 
 ## Running the posttrain path
 
