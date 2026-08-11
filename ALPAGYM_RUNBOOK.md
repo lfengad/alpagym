@@ -7,6 +7,26 @@ upstream AlpaGym; keep it out of PRs to NVlabs/alpagym.
 Verified end to end on 2026-08-10: 22 valid closed-loop policy steps per episode,
 6 rollouts, one GRPO step, checkpoint written.
 
+## Two Modes
+
+The training half has been replaced; the AlpaSim half has not. Which mode you get is
+decided by the checkout, not by a config flag — the launcher runs one entry
+unconditionally, and keeping both alive behind a switch would mean maintaining two
+parallel implementations of the config schema, the log format and the checkpoint layout.
+
+| Mode | Checkout | Training entry |
+|---|---|---|
+| **cosmos-rl** (pre-migration) | `main` | `cosmos_rl.launcher.launch_all` |
+| **posttrain** (current) | `posttrain-migration` | `projects.cosmos3.posttrain.entrypoints.alpagym_clrl` |
+
+Everything up to and including [Why This Cluster Needs Adaptation](#why-this-cluster-needs-adaptation)
+applies to both. From [Reading a Run](#reading-a-run) on, the sections say which mode they
+describe. posttrain additionally needs imaginaire4 checked out — see
+[Running the posttrain path](#running-the-posttrain-path).
+
+Note this runbook lives only on `posttrain-migration`; `main` predates it. Read it from
+here even when running the cosmos-rl mode.
+
 ## Table of Contents
 
 - [Quick Start](#quick-start)
@@ -14,6 +34,7 @@ Verified end to end on 2026-08-10: 22 valid closed-loop policy steps per episode
 - [What Persists Between Allocations](#what-persists-between-allocations)
 - [Cold Start](#cold-start)
 - [Why This Cluster Needs Adaptation](#why-this-cluster-needs-adaptation)
+- [Two Modes](#two-modes)
 - [Reading a Run](#reading-a-run)
 - [Running the posttrain path](#running-the-posttrain-path)
 - [Troubleshooting](#troubleshooting)
@@ -189,11 +210,24 @@ dispatches services through `srun` instead. That backend comes from the
 `slurm_full_node_1_3_4` topology, and `command=run` (the default `deploy=local`)
 keeps execution inline rather than submitting a new job.
 
-**Slurm renumbers bound GPUs.** `--gpu-bind=mask_gpu:0xf0` exposes the node's
-GPUs 4-7 as 0-3 inside the step. Upstream's `alpagym_4gpu` addresses them as
-physical 4-7, which fails validation. `alpagym_4gpu_local_ids` is the same
-topology with local ids. The Cosmos step is bound the same way and also sees its
-four as 0-3, so the two never collide.
+**Slurm renumbers bound GPUs — but only for the process it binds.**
+`--gpu-bind=mask_gpu:0xf0` makes the Wizard step see GPUs 4-7 as 0-3, so upstream's
+`alpagym_4gpu` (which names them 4-7) fails the Wizard's own id validation here. The
+services it launches are NOT renumbered: the Wizard issues its own `srun --overlap` per
+service with no GPU flags at all, so each inherits the whole allocation and picks a
+device by absolute `CUDA_VISIBLE_DEVICES`.
+
+The two frames therefore invert: ids that pass validation (0-3) land on the trainer's
+GPUs, and the ids that land correctly (4-7) are rejected before the run starts.
+
+- **posttrain mode** — fixed. `build_wizard_srun_command` gives the Wizard step every
+  GPU on the host, so validation and placement share one frame and stock `alpagym_4gpu`
+  is correct. Verified: AlpaSim on 4-7, training alone on 0-3.
+- **cosmos-rl mode (`main`)** — not fixed there. Cherry-pick that `slurm.py` change, or
+  accept that the stock topology will not start. Do NOT "fix" it by renumbering the
+  topology to 0-3: that passes validation and silently runs the simulator on the
+  trainer's GPUs, which fits a single step and exhausts GPU 0 once the optimizer states
+  exist. See [Upstream Bugs](#upstream-bugs-worth-reporting).
 
 **`alpasim-base` cannot be built.** Four services (`driver`, `physics`,
 `trafficsim`, `controller`) use an image built from AlpaSim's Dockerfile;
@@ -222,10 +256,52 @@ Under `~/work/alpagym/tmp/alpagym-runs/<timestamp>-<id>/`:
 |---|---|
 | `logs/wizard_0.log` | AlpaSim bring-up; service dispatch and readiness |
 | `alpasim/wizard_0/txt-logs/out-*-<service>-*.log` | One per service container |
-| `logs/cosmos_0.log` | The posttrain entry: GPU plan, Ray bring-up, per-step metrics |
-| `logs/actor_<pid>.log` | One per Ray actor — trainer ranks, rollout replicas, reward/buffer |
-| `checkpoints/{model,optim,trainer}.pt` | Written by `LLMTrainer.save` at the end of the run |
+| `logs/cosmos_0.log` | The training launcher — cosmos-rl's GPU plan and replica commands, or the posttrain entry's Ray bring-up and per-step metrics |
+| `logs/logs_latest/{controller,policy_0,rollout_*}.log` | cosmos-rl only: training and rollout |
+| `logs/actor_<pid>.log` | posttrain only: one per Ray actor — trainer ranks, rollout replicas, reward/buffer |
+| `cosmos/<ts>/checkpoints/step_N`, `cosmos/<ts>/safetensors/step_N` | cosmos-rl only: checkpoint and AlpaSim-eval export |
+| `checkpoints/{model,optim,trainer}.pt` | posttrain only: written by `LLMTrainer.save` at the end of the run |
 | `resolved_config.yaml` | The frozen config the run actually used |
+
+### cosmos-rl mode (`main`)
+
+A healthy run reaches these in order:
+
+```
+All addresses open.                              # 9 sim services up
+AlpaSim RuntimeService is ready at <host>:<port> # 10th (runtime) up
+Detected 4 GPUs: 0, 1, 2, 3                      # cosmos side
+Packed AlpaGym replay artifact ... valid_steps=22 padded_steps=0 reward=...
+AlpaGym trainer step start current_step=1 total_steps=1
+AlpaGym trainer step end ... loss_avg=... clip_fraction=...
+[Policy] Saving huggingface checkpoint at step 1
+Cosmos launcher completed
+Stopping 1 AlpaSim Wizard process(es)
+```
+
+**`Cosmos launcher completed` is the success marker.** What follows it looks
+alarming but is not:
+
+```
+srun: forcing job termination
+srun: error: pool0-XXXXX: task 0: Killed
+srun: Terminating StepId=<jobid>.N
+```
+
+That is AlpaGym tearing down the Wizard's srun step. The launch script's trailing
+`RUN_EXIT=` line usually never gets written because the teardown takes the shell
+with it — judge the run by `Cosmos launcher completed` and the checkpoint on
+disk, not by an exit code.
+
+`valid_steps` should equal `expected_valid_steps` (22) with `padded_steps=0`.
+Padding means episodes are ending early — usually a sim-side failure, not a
+config problem.
+
+On the smoke config an untuned policy scores around -9.4, which under
+`progress_safety` is roughly one collision (-10) plus a little progress. That is
+expected, not a bug.
+
+### posttrain mode (`posttrain-migration`)
 
 A healthy run reaches these in order:
 
@@ -248,7 +324,7 @@ srun: Terminating StepId=<jobid>.N
 That is AlpaGym tearing down the Wizard's srun step. Judge the run by `saved checkpoint`
 and the files on disk, not by an exit code.
 
-### The three numbers that say a run is healthy
+### The three numbers that say a run is healthy (posttrain)
 
 | Line | Healthy | What a bad value means |
 |---|---|---|
@@ -260,7 +336,7 @@ and the files on disk, not by an exit code.
 other signal — the loss, the gradient norm, the version stamps and the checkpoint all
 looked normal while the rollout sampled from a policy the trainer had left behind.
 
-### Startup self-check
+### Startup self-check (posttrain)
 
 The loop syncs once before training and the rollout verifies that transfer is identity
 (both sides still hold the same checkpoint). A failure raises immediately:
@@ -314,7 +390,7 @@ Every failure hit while bringing this up, in the order they appear.
 | `Could not override 'experiment'` | The policy package is not installed, so its config group is invisible | `hydra.searchpath=[file://.../alpamayo_r1/.../configs]` |
 | `no token was found` (HuggingFace) | Non-interactive shells skip `~/.bashrc` | Script pulls just the `HF_TOKEN` line out of it |
 | `git-lfs: command not found` | Compute nodes lack git-lfs; AlpaSim is an LFS repo | Staged binary on `/lustre`, prepended to `PATH` |
-| `requested GPUs [4,5,6,7] but only 0..3 are available` | Slurm renumbers bound GPUs | `alpasim.wizard_args.topology=alpagym_4gpu_local_ids` |
+| `requested GPUs [4,5,6,7] but only 0..3 are available` | The Wizard step is masked to AlpaSim's half, so its id validation runs in a renumbered frame while service placement does not | posttrain: already fixed (Wizard sees every GPU). cosmos-rl: cherry-pick that `slurm.py` change — renumbering the topology to 0-3 passes the check but puts the simulator on the trainer's GPUs |
 | `ENROOT_CONFIG_PATH is not set` | `/etc/enroot/enroot.conf` sets enroot's own default, not the env var | `export ENROOT_CONFIG_PATH=$HOME/.config/enroot` |
 | `enroot import ... docker://alpasim-base:0.91.0` fails | Image has no registry and cannot be built without Docker | Symlink a stock `.sqsh` into the squash cache |
 | `Failed to spawn: physics_server` / `No module named 'alpasim_controller'` | Stock image has no `/repo`, so `uv run` falls back to a bare interpreter | `deploy=cw_dfw_slurm` mounts the checkout at `/repo`, sets `workdir` and `UV_NO_SYNC=1` |
