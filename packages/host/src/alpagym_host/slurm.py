@@ -60,8 +60,15 @@ def build_wizard_srun_command(
         "--nodes=1",
         "--ntasks=1",
         f"--nodelist={host.hostname}",
-        f"--gpus-per-task={host.alpasim_gpus}",
-        f"--gpu-bind=mask_gpu:{_gpu_mask(host.alpasim_gpu_ids)}",
+        # The Wizard sees EVERY GPU on the host, and the topology config names AlpaSim's by
+        # physical id. Binding this step to AlpaSim's share instead looks tighter but is not:
+        # the Wizard only orchestrates, and each service is placed by the `srun --overlap` the
+        # Wizard itself issues -- those carry no GPU flags at all, so they inherit the whole
+        # allocation and pick a device purely from `CUDA_VISIBLE_DEVICES=<topology id>`.
+        # A mask here therefore constrains only the Wizard's own id VALIDATION (to 0..n-1 of its
+        # renumbered view) while leaving service PLACEMENT unrestricted: ids that pass the check
+        # land on the trainer's GPUs, and the ids that would land correctly are rejected.
+        f"--gpus-per-task={host.alpasim_gpus + host.cosmos_gpu_count}",
     ]
     if not slurm.exclusive:
         srun_command.append("--cpu-bind=none")
