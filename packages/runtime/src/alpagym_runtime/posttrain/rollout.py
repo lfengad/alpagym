@@ -14,9 +14,10 @@ driver server, streaming worker, and the shutdown ordering -- is carried over un
 framework-facing surface differs (``generate``/``prepare_recv``/``apply_bucket`` instead of
 ``rollout_generation``/``model_param_map``/``set_underlying_model``).
 
-Unlike the cosmos-rl body this module imports NOTHING from ``cosmos_rl``: the streaming worker only
-reads ``payload.prompt_idx`` and hands the payload to the scene-id resolver, so a local dataclass
-serves where ``RLPayload`` used to.
+Nothing on this module's import graph reaches ``cosmos_rl`` -- verified by importing it and finding
+no ``cosmos_rl`` entry in ``sys.modules``, which is the claim that matters and is not the same as
+the module's own import list being clean. It was not: ``streaming_worker`` imported ``RLPayload``
+for a type annotation, and that one line loaded 185 cosmos-rl modules into the rollout actor.
 """
 
 from __future__ import annotations
@@ -64,11 +65,10 @@ _MAX_GRPC_MSG_SIZE = 256 * 1024 * 1024  # 256 MiB; matches AlpaSim runtime defau
 
 @dataclass(frozen=True)
 class _ScenePayload:
-    """One prompt's work item for `StreamingRolloutWorker`.
+    """One prompt's work item, satisfying `StreamingRolloutWorker`'s `ScenePayload` protocol.
 
-    The worker reads `prompt_idx` (its dedup key) and passes the payload to the scene-id resolver;
-    nothing else on cosmos-rl's `RLPayload` was ever used, so this stands in for it and keeps
-    `cosmos_rl` off this module's import graph.
+    `scene_id` is read by the resolver this module hands the worker; `prompt_idx` is the worker's
+    dedup key. Nothing else on cosmos-rl's `RLPayload` was ever used.
     """
 
     prompt_idx: int

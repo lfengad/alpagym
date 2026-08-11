@@ -10,11 +10,10 @@ import threading
 import uuid
 from concurrent.futures import Future
 from dataclasses import dataclass, field, replace
-from typing import Callable
+from typing import Callable, Protocol
 
 from alpagym_host.config import RewardConfig
 from alpasim_grpc.v0.runtime_pb2_grpc import RuntimeServiceStub
-from cosmos_rl.dispatcher.data.schema import RLPayload
 
 from alpagym_runtime.alpasim.driver_server import EgodriverServer
 from alpagym_runtime.alpasim.proto_conversion import build_simulation_request_proto
@@ -23,6 +22,18 @@ from alpagym_runtime.rewards.compute import compute_reward
 from alpagym_runtime.types import EpisodeMetrics, EpisodeOutput
 
 logger = logging.getLogger(__name__)
+
+
+class ScenePayload(Protocol):
+    """A prompt's work item, as far as this worker is concerned.
+
+    The worker uses `prompt_idx` as its dedup key and otherwise treats the payload as opaque,
+    handing it to the caller's scene-id resolver. Spelling that as a protocol rather than naming
+    a concrete class keeps `cosmos_rl` off this module's import graph -- importing its `RLPayload`
+    for the annotation alone pulled in 185 modules and ran cosmos-rl's whole model auto-discovery.
+    """
+
+    prompt_idx: int
 
 
 @dataclass(eq=False)
@@ -34,7 +45,7 @@ class SharedPayloadState:
     lock by the thread that flipped `future_resolved` from False to True.
     """
 
-    payload: RLPayload
+    payload: ScenePayload
     n_target: int
     future: Future[list[EpisodeOutput]]
     retries_left: int
@@ -81,7 +92,7 @@ class StreamingRolloutWorker:
         reward_config: RewardConfig,
         max_concurrent_rollouts: int,
         rollouts_per_payload: int,
-        scene_id_resolver: Callable[[RLPayload], str],
+        scene_id_resolver: Callable[[ScenePayload], str],
         max_scene_retries: int = 3,
     ) -> None:
         """Wire the worker and start `max_concurrent_rollouts` simulate-pool threads."""
@@ -129,7 +140,7 @@ class StreamingRolloutWorker:
 
     # ---------- public dispatch surface ----------
 
-    def submit_payload(self, payload: RLPayload) -> SharedPayloadState:
+    def submit_payload(self, payload: ScenePayload) -> SharedPayloadState:
         """Return the running state for `payload`; dispatch at most once per `prompt_idx`.
 
         A repeat call with the same `prompt_idx` returns the state from

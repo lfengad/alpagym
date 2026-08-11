@@ -2,16 +2,24 @@
 # SPDX-License-Identifier: Apache-2.0
 """Entry-point registry for policy-owned runtime hooks."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, fields
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import torch
 from alpagym_host.config import RunConfig
 from alpagym_plugins.plugins import PluginRegistry
 
-from alpagym_runtime.cosmos.packer import AlpagymDataPacker
 from alpagym_runtime.inference.types import InferenceModel
 from alpagym_runtime.replay import PolicyReplayData
+
+if TYPE_CHECKING:
+    # `build_data_packer` is the cosmos-rl path's hook and this name is only ever a type here.
+    # Importing it eagerly runs `alpagym_runtime.cosmos.packer`, which imports `cosmos_rl` and
+    # loads ~190 of its modules into every process that touches the policy registry -- including
+    # the posttrain rollout actor, which never calls this hook.
+    from alpagym_runtime.cosmos.packer import AlpagymDataPacker
 
 
 @dataclass(frozen=True)
