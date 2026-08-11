@@ -1,0 +1,42 @@
+# @package _global_
+# Deploy target: a Slurm cluster with no Docker, where the `alpasim-base` image
+# cannot be built. The services that would use it run from a stock CUDA image
+# instead, with the AlpaSim checkout bind-mounted at /repo so `uv run` picks up
+# the `.venv` the checkout already carries. `UV_NO_SYNC` keeps uv from rewriting
+# that venv on every service start.
+#
+# Point the `alpasim_base_<version>.sqsh` entry in the squash cache at the stock
+# image before using this; the Wizard reuses an existing .sqsh instead of
+# importing one.
+
+defines:
+  filesystem: ${repo-relative:"data"}
+
+services:
+  physics:
+    workdir: /repo
+    environments:
+      - WARP_CACHE_PATH='/mnt/warp'
+      - UV_NO_SYNC=1
+    volumes:
+      - "${scenes.scene_cache}:/mnt/nre-data"
+      - "${repo-relative:'.'}:/repo"
+
+  controller:
+    workdir: /repo
+    environments:
+      - UV_NO_SYNC=1
+    volumes:
+      - "${wizard.log_dir}/controller:/mnt/output"
+      - "${wizard.log_dir}:/mnt/config"
+      - "${repo-relative:'.'}:/repo"
+
+  runtime:
+    workdir: /repo
+    environments:
+      - UV_NO_SYNC=1
+    volumes:
+      - "${scenes.scene_cache}:/mnt/nre-data"
+      - "${wizard.log_dir}:/mnt/log_dir"
+      - "${or:${wizard.array_job_dir},${wizard.log_dir}}:/mnt/array_job_dir"
+      - "${repo-relative:'.'}:/repo"
