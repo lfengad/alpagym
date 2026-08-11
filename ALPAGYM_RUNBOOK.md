@@ -45,6 +45,13 @@ here even when running the cosmos-rl mode.
 
 Everything heavy is already staged on `/lustre`. A run is three commands.
 
+Check out the branch for the mode you want first — see [Two Modes](#two-modes). The
+launch script is `scripts/cw-dfw/run_alpagym_clrl.sh` in this repo; the commands below
+use the copy at `~/work/run_alpagym_clrl.sh`, which is that file with `BASE` pointed at
+your `/lustre` tree. Copy it there once (`cp scripts/cw-dfw/run_alpagym_clrl.sh
+~/work/`) rather than editing the tracked one, so the committed copy stays the
+reference.
+
 ```bash
 # 1. Get an allocation (login host shell). ~/run.sh is interactive; for an
 #    unattended one, swap `--pty bash -i` for `sleep infinity` and background it.
