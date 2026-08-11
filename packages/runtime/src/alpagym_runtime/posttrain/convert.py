@@ -4,10 +4,14 @@
 """Convert a completed AlpaSim episode into posttrain's unified Trajectory.
 
 One ``EpisodeOutput`` becomes one ``Trajectory`` whose transitions are the episode's drive ticks.
-The per-step replay payload -- the model-family-owned tensor tree ``alpamayo_r1`` needs to rescore
-the action it took -- stays opaque under ``algo_extra["payload"]``. posttrain's codec walks nested
-dicts and dataclasses, so the large tensors inside it (camera frames above all) are still
-externalized to ``BulkRef``s and never travel on the control plane.
+The per-step replay envelope -- the ``PolicyReplayData`` ``alpamayo_r1`` needs to rescore the
+action it took -- stays opaque under ``algo_extra["replay_data"]``. The WHOLE envelope is kept, not
+just its ``payload`` dict: the model family's own
+``AlpamayoR1InferenceModel.build_trainer_model_inputs`` reads ``model_family``, ``payload_schema``
+and ``old_logprob`` off it as well, and handing it a bare payload would strip the very fields it
+validates against. posttrain's codec walks dataclasses and nested dicts alike, so the large tensors
+inside (camera frames above all) are still externalized to ``BulkRef``s and never travel on the
+control plane.
 
 NOTE: ``alpagym_runtime.types.Trajectory`` is the ego vehicle's PHYSICAL path and is unrelated to
 posttrain's RL ``Trajectory`` imported here. Only the posttrain one is used in this module.
@@ -70,7 +74,7 @@ def episode_to_trajectory(episode: EpisodeOutput, obs: ObsBundle, traj_id: str) 
                 obs=obs,
                 action=replay_data.action_selection,
                 policy_info={"logprob": replay_data.old_logprob},
-                algo_extra={"payload": replay_data.payload},
+                algo_extra={"replay_data": replay_data},
                 step_idx=step_idx,
                 done=step_idx == last,
             )

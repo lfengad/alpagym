@@ -101,7 +101,11 @@ class AlpagymRollout(WeightReceiverBase):
         self._group_size = int(run_config.cosmos.rollout.n_generation)
 
         self._inference_engine = build_inference_engine(run_config)
-        self._model = self._inference_engine.get_model()
+        # PUBLIC `model`, not `_model`: `_Host.set_weight_backend` injects the weight-sync backend
+        # into every body that `hasattr(body, "model")`. Under a private name the injection silently
+        # skips this rollout, every pushed bucket is dropped, and the failure only surfaces at
+        # `stamp_weight_version`. The cosmos-rl port used `_model`; posttrain's convention does not.
+        self.model = self._inference_engine.get_model()
         record_perf_marker("rollout/model_ready", cpu_snapshot=True, gpu_snapshot=True)
         policy_factory = build_policy_factory(run_config, self._inference_engine)
         distributed = ExecutionBackend(run_config.execution.backend).is_slurm_run
@@ -245,7 +249,7 @@ class AlpagymRollout(WeightReceiverBase):
         model (no tensor parallelism), so every tensor is reported whole."""
         return {
             name: ShardSpec(offset=0, length=param.shape[0] if param.dim() else 1, dim=0)
-            for name, param in self._model.named_parameters()
+            for name, param in self.model.named_parameters()
         }
 
     @property

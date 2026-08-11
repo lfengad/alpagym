@@ -4,7 +4,7 @@
 """Tests for converting a completed AlpaSim episode into a posttrain Trajectory.
 
 One episode becomes one Trajectory of N Transitions (one per drive tick). The per-step replay
-payload stays OPAQUE in ``algo_extra["payload"]``: posttrain's codec walks nested dicts and
+envelope stays OPAQUE in ``algo_extra["replay_data"]``: posttrain's codec walks nested dicts and
 externalizes the large tensors inside to BulkRefs, so opacity costs nothing on the bulk plane,
 while splitting the payload across obs/action would force changes to alpamayo_r1's
 ``from_payload`` contract.
@@ -103,7 +103,12 @@ def test_logprob_action_and_opaque_payload_land_in_their_fields() -> None:
     second = trajectory.transitions[1]
     assert float(second.policy_info["logprob"]) == -1.0
     assert second.action == ActionSelection(set_ix=0, sample_ix=1)
-    assert "image_frames" in second.algo_extra["payload"]["model_input"]
+    replay = second.algo_extra["replay_data"]
+    # The WHOLE envelope, not just .payload: build_trainer_model_inputs validates model_family and
+    # payload_schema off it before touching the tensors.
+    assert replay.model_family == "alpamayo_r1"
+    assert replay.payload_schema == "alpamayo_r1.trajectory.v1"
+    assert "image_frames" in replay.payload["model_input"]
 
 
 def test_done_is_set_only_on_the_last_transition() -> None:

@@ -11,6 +11,8 @@ Milestone 1 does not port the reference model, so a config asking for KL must fa
 than silently training KL-free.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from alpagym_runtime.posttrain.objective import make_alpagym_objective
@@ -21,9 +23,9 @@ _CLIPS = {"ratio_clip_low": 0.2, "ratio_clip_high": 0.2}
 _OFF = {"kl_beta": 0.0, "reference_reset_interval": 0}
 
 
-def _build_model_inputs(payload):
-    """Stand-in for the policy bundle's hook: forward the stored row and its logprob."""
-    return {"row": payload["row"]}, payload["old_logprob"]
+def _build_model_inputs(replay_data):
+    """Stand-in for the policy bundle's hook, which takes the whole replay ENVELOPE."""
+    return {"row": replay_data.payload["row"]}, replay_data.old_logprob
 
 
 class _ShiftModel(torch.nn.Module):
@@ -46,10 +48,10 @@ def _trajectory(n_steps: int, advantage: float, old_logprob: float = 0.0) -> Tra
             obs=obs,
             policy_info={"logprob": torch.tensor(old_logprob)},
             algo_extra={
-                "payload": {
-                    "row": torch.tensor(float(old_logprob)),
-                    "old_logprob": torch.tensor(old_logprob),
-                }
+                "replay_data": SimpleNamespace(
+                    payload={"row": torch.tensor(float(old_logprob))},
+                    old_logprob=torch.tensor(old_logprob),
+                )
             },
             step_idx=i,
         )

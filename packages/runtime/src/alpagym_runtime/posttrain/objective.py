@@ -26,6 +26,8 @@ from projects.cosmos3.posttrain.algorithm.annotators.advantage import require_ad
 from projects.cosmos3.posttrain.algorithm.objective import Objective, Reduction
 from projects.cosmos3.posttrain.schema import Trajectory
 
+from alpagym_runtime.replay import stack_step_model_inputs
+
 from alpagym_runtime.cosmos.replay_objective import (
     assert_replay_shapes,
     compute_kl_penalty,
@@ -44,9 +46,10 @@ def make_alpagym_objective(
     """Bind the replay PPO surrogate to one policy family's model-input dialect.
 
     Args:
-        build_model_inputs: the policy bundle's hook, mapping one replay payload to
-            ``(model_forward_kwargs, old_logprob)``. Each policy owns its own dialect; this
-            objective stays policy-agnostic by receiving it.
+        build_model_inputs: the policy bundle's hook, mapping one ``PolicyReplayData`` envelope
+            to ``(model_forward_kwargs, old_logprob)``. It takes the whole envelope, not the bare
+            payload -- it validates ``model_family``/``payload_schema`` before shaping. Each policy
+            owns its own dialect; this objective stays policy-agnostic by receiving the hook.
         ratio_clip_low: PPO epsilon below 1.0.
         ratio_clip_high: PPO epsilon above 1.0.
         kl_beta: KL penalty weight. Must be 0.0 in milestone 1 (no reference model).
@@ -78,15 +81,20 @@ def make_alpagym_objective(
         model_inputs: list[dict[str, Any]] = []
         old_logprobs: list[torch.Tensor] = []
         for transition in rows:
-            inputs, old_logprob = build_model_inputs(transition.algo_extra["payload"])
+            inputs, old_logprob = build_model_inputs(transition.algo_extra["replay_data"])
             model_inputs.append(inputs)
             old_logprobs.append(old_logprob)
 
         device = next(model.parameters()).device
+        # Reuse AlpaGym's OWN collation rather than restacking here. `_stack_values` treats
+        # non-tensor leaves (e.g. `cfm_method`) differently from tensors, and `return_log_prob` is
+        # part of the contract the packer passes -- a per-key `torch.as_tensor` reimplementation
+        # gets both wrong quietly, changing what the model computes rather than raising.
         collated = {
-            key: torch.stack([torch.as_tensor(inputs[key]) for inputs in model_inputs]).to(device)
-            for key in model_inputs[0]
+            key: (value.to(device) if isinstance(value, torch.Tensor) else value)
+            for key, value in stack_step_model_inputs(model_inputs).items()
         }
+        collated["return_log_prob"] = True
         old = torch.stack([torch.as_tensor(v) for v in old_logprobs]).to(device).float()
         advantages = torch.tensor(
             [float(transition.advantage) for transition in rows],
