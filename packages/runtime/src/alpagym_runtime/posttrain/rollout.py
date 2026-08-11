@@ -242,7 +242,7 @@ class AlpagymRollout(WeightReceiverBase):
         version rather than advertising weights it never loaded."""
         if self._weight_backend is None:
             return
-        self._weight_backend.apply_bucket(payload, i)
+        self._weight_backend.apply_bucket(self.model, i, payload)
 
     def prepare_recv(self) -> dict[str, ShardSpec]:
         """Report this rank's receive layout per parameter. The inference engine holds the whole
