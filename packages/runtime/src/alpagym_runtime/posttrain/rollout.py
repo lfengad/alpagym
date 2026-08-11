@@ -89,6 +89,8 @@ class AlpagymRollout(WeightReceiverBase):
         self._topology_registry = FileTopologyRegistry(run_config.artifact_paths.topology_registry_dir)
         self._weight_backend: Any = None
         self._weight_version = 0
+        # Verify the first sync only (see `apply_bucket`); cleared once that stream lands.
+        self._verify_sync = True
         self._payload_seq = 0
         self._shutdown_done = False
         # Built below; None sentinels so `shutdown` no-ops cleanly on a partial init failure.
@@ -242,7 +244,34 @@ class AlpagymRollout(WeightReceiverBase):
         version rather than advertising weights it never loaded."""
         if self._weight_backend is None:
             return
-        self._weight_backend.apply_bucket(self.model, i, payload)
+        if not self._verify_sync:
+            self._weight_backend.apply_bucket(self.model, i, payload)
+            return
+        # Startup self-check, first sync only. Before any training the trainer holds the same
+        # checkpoint this model loaded, so the transfer has to be numerically identity. Split the
+        # fetch from the load (posttrain exposes both halves) and compare on the way through: a
+        # transfer that corrupts a few tensors is otherwise invisible until the ratio drifts several
+        # steps later, which reads as a training problem rather than a sync one. The bar sits above
+        # bf16's 2**-13 round-trip.
+        state = self._weight_backend.fetch_bucket_state(payload, i)
+        if state is not None:
+            current = dict(self.model.named_parameters())
+            for name, incoming in state.items():
+                have = current.get(name)
+                if have is None:
+                    continue
+                diff = (incoming.detach().float() - have.detach().float()).abs().max().item()
+                if diff > 1e-3:
+                    raise RuntimeError(
+                        f"weight sync is not identity at startup: {name} differs by {diff:.3e} "
+                        f"before any training, when both sides still hold the same checkpoint"
+                    )
+        self._weight_backend.apply_bucket_state(self.model, i, state)
+
+    def stamp_weight_version(self, version: int) -> None:
+        """Record the version, and retire the startup self-check once the first stream lands."""
+        super().stamp_weight_version(version)
+        self._verify_sync = False
 
     def prepare_recv(self) -> dict[str, ShardSpec]:
         """Report this rank's receive layout per parameter. The inference engine holds the whole
