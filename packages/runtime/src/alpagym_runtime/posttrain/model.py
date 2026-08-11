@@ -60,6 +60,8 @@ class AlpamayoTrainModel(nn.Module):
         self.ckpt_path = model_name_or_path
         self.dtype = dtype
         self.hf_config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
+        # {param name: rows before FSDP padding}; consulted by the weight-sync export.
+        self.unpadded_rows: dict[str, int] = {}
         # Buffers are created real (include_buffers=False) so values like RoPE inv_freq keep their
         # init-time contents -- same reasoning as HFModel.
         with init_on_device("meta", include_buffers=False):
@@ -118,7 +120,26 @@ class AlpamayoTrainModel(nn.Module):
                     cast_forward_inputs=False,
                 ),
             }
+            # `_apply_fsdp2` pads any Linear whose out_features is below the shard count, so every
+            # rank gets a non-empty shard (`pad_linear_for_fsdp`: zero rows plus a forward hook that
+            # slices the output back). The padding is invisible to this model's own compute, but
+            # `state_dict` reports the padded shape, and weight sync would push those zero rows to a
+            # rollout that never padded -- `[4, 2048]` into `[2, 2048]`. Record what was padded here,
+            # where the before/after is still visible, so the export can undo it.
+            pre_pad = {
+                name: module.out_features
+                for name, module in self.net.named_modules()
+                if isinstance(module, torch.nn.Linear)
+            }
             self.model._apply_fsdp2(dp_mesh, fsdp_config, build_reshard_fn("default"))
+            for name, module in self.net.named_modules():
+                if not isinstance(module, torch.nn.Linear) or module.out_features <= pre_pad.get(name, 0):
+                    continue
+                self.unpadded_rows[f"{name}.weight"] = pre_pad[name]
+                if module.bias is not None:
+                    self.unpadded_rows[f"{name}.bias"] = pre_pad[name]
+            if self.unpadded_rows:
+                logger.info("AlpamayoTrainModel: exporting unpadded %s", sorted(self.unpadded_rows))
 
         # Materialize like `HFModel._materialize_meta`, NOT with `to_empty`. `__init__` builds
         # buffers REAL (`include_buffers=False`), so tensors such as RoPE `inv_freq` already hold
