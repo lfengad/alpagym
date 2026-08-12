@@ -38,6 +38,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+from projects.cosmos3.posttrain.comm.weight_transfer import WeightMapper
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,7 @@ class AlpamayoTrainModel(nn.Module):
         self.ckpt_path = model_name_or_path
         self.dtype = dtype
         self.hf_config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=True)
-        # {param name: rows before FSDP padding}; consulted by the weight-sync export.
+        # {param name: rows before FSDP padding}; read by AlpamayoWeightMapper below.
         self.unpadded_rows: dict[str, int] = {}
         # Buffers are created real (include_buffers=False) so values like RoPE inv_freq keep their
         # init-time contents -- same reasoning as HFModel.
@@ -184,3 +185,28 @@ class AlpamayoTrainModel(nn.Module):
         contract `alpagym_runtime.posttrain.objective` scores against.
         """
         return self.model(**kwargs)
+
+
+class AlpamayoWeightMapper(WeightMapper):
+    """The weight-sync mapper for `AlpamayoTrainModel`: everything the base does, plus the pad.
+
+    `ExpertModelCosmos._apply_fsdp2` zero-pads `action_out_proj` (out_features 2, below the shard
+    count) so no rank gets an empty DTensor shard, and a forward hook slices the output back. That
+    hook hides the pad from COMPUTE but not from `state_dict`, so the rollout -- which never sharded
+    and holds the parameter at its true width -- would be handed rows that are not weights.
+
+    Only the pad is overridden; the gather, the bucket materialization and the manifest are the base
+    mapper's. Upstream has the mirror of this on the LOAD side only
+    (`alpamayo1_x_rl.utils.weight_loading.copy_state_into_dtensor_shards(pad_to_match=True)`, which
+    grows a smaller checkpoint tensor to fit the padded model); nothing upstream shrinks on export,
+    because a padded trainer pushing to an unpadded inference model is a closed-loop-RL edge that
+    does not arise there.
+    """
+
+    def _unpadded_rows(self, model: AlpamayoTrainModel) -> dict[str, int]:
+        """The rows recorded around `_apply_fsdp2` in `setup`. Direct access, not a probe: this
+        mapper is registered for exactly this model, so a missing attribute is a real fault."""
+        return model.unpadded_rows
+
+
+WeightMapper.register(AlpamayoTrainModel, AlpamayoWeightMapper)
