@@ -316,10 +316,16 @@ A healthy run reaches these in order:
 ```
 All addresses open.                                  # 9 sim services up
 AlpaSim RuntimeService is ready at <host>:<port>     # 10th (runtime) up
+[alpagym] lr=1e-06, 20-step linear warmup          # LR schedule, logged once at build
 [alpagym] scored episodes=6 ticks=132 aborted=0 ticks_per_episode=[22]
-[alpagym] step=0 weight_version=1 clip_fraction=0.0 ... ratio_min=1.0001
+step    1/5  weight/version +1.0000  ratio/min +0.9999  clip/fraction +0.0000
 [alpagym] saved checkpoint to .../checkpoints
 ```
+
+The per-step line comes from posttrain's `ConsoleReporter`, so it is the same format
+every posttrain entry prints: `step done/total` then the headline scalars, each rendered
+`+%.4f`. `optim/lr` is deliberately not among them — at 1e-6 it would read `+0.0000`
+every step, which is why the schedule is logged once at startup instead.
 
 **`saved checkpoint` is the success marker.** What follows it looks alarming but is not:
 
@@ -337,10 +343,10 @@ and the files on disk, not by an exit code.
 | Line | Healthy | What a bad value means |
 |---|---|---|
 | `scored episodes=P ticks=T aborted=0` | `T == P × 22` | `aborted>0` or a short `ticks_per_episode` means episodes ended early — the buffer drops aborted trajectories, so the step trains on less than it reports |
-| `ratio_min` per step | within ~1e-3 of 1.0 | The trainer rescores the rollout's own action with the same weights, so it must be ~1. **Drifting away over steps means the rollout is not getting the trainer's weights**; a sudden collapse means it is getting the wrong ones |
-| `clip_fraction` | 0.0 early on | 1.0 means every sample hit the PPO clamp — usually the same weight-plane fault as above, not a hyperparameter to tune |
+| `ratio/min` per step | within ~1e-3 of 1.0 | The trainer rescores the rollout's own action with the same weights, so it must be ~1. **Drifting away over steps means the rollout is not getting the trainer's weights**; a sudden collapse means it is getting the wrong ones |
+| `clip/fraction` | 0.0 early on | 1.0 means every sample hit the PPO clamp — usually the same weight-plane fault as above, not a hyperparameter to tune |
 
-`ratio_min` is the one to watch. Two separate weight-sync bugs were invisible in every
+`ratio/min` is the one to watch. Two separate weight-sync bugs were invisible in every
 other signal — the loss, the gradient norm, the version stamps and the checkpoint all
 looked normal while the rollout sampled from a policy the trainer had left behind.
 
@@ -432,6 +438,8 @@ Every failure hit while bringing this up, in the order they appear.
 | `'PolicyStatusManager' has no attribute '_publish_payload_transport_cleanup'` | A `PYTHONPATH` in `~/.bashrc` shadows the pinned cosmos-rl with a local checkout | Remove it from `~/.bashrc` (backup: `~/.bashrc.bak.alpagym`) |
 | Host venv suddenly broken, `bin/python` a dangling symlink | `UV_PROJECT_ENVIRONMENT` leaked through `--export=ALL`; the container's `uv sync` overwrote it | Never export it; invoke `.venv-host/bin/python` directly |
 | Hang at first weight sync, both GPUs at 100% | NCCL advertises a P2P transport that stalls | Prefix with `NCCL_P2P_DISABLE=1` (not needed on this cluster) |
+| A test fails on a name that no longer exists in your local tree | `rsync -az` decides by size+mtime, so a file whose size and timestamp both happen to match is skipped SILENTLY — you then "verify" against code you never sent. Here a renamed test kept the old spelling on the cluster while `slurm.py` beside it was current | Sync with `-c`: `rsync -az --checksum ...`. `rsync -avz --dry-run --checksum` lists exactly what drifted; ignore the trailing-slash directory lines, they are metadata only |
+| Holder dies in seconds: `pyxis: failed to create container filesystem`, `dir_scan: failed to make directory /raid/enroot/data/user-<uid>/pyxis_<jobid>_liangf_dev/... File exists` | `--container-name liangf_dev` reuses a named enroot tree, and a node carrying a half-extracted one from an earlier job cannot re-extract into it. The node is the variable, so the same command works or fails depending on where it lands | Drop `--container-name` from the HOLDER — it only has to hold the allocation, and every step already carries its own `--container-image`/`--container-mounts`. Read `$B/slurm-node.log`: `srun` itself reports only `task 0: Exited with exit code 1` |
 
 **Orphaned steps.** A failed run leaves `alpasim-*` srun steps behind. They hold **ports and GPU
 memory** — the renderers (`pycena_nrm_full_cc serve-grpc`) and `physics_server` sit on 16-17 GiB

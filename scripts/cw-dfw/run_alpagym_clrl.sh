@@ -32,7 +32,8 @@ export ENROOT_CONFIG_PATH="$HOME/.config/enroot"
 mkdir -p "$UVC" "$CACHE/sqsh" "$CACHE/alpasim/checkouts"
 cd "$BASE/alpagym"
 
-MODE=${1:-cfg}   # cfg = print composed config only, run = actually launch
+MODE=${1:-cfg}    # cfg = print composed config only, run = actually launch
+STEPS=${2:-1}     # closed-loop steps; reaches the entry as --steps (run_lifecycle.py)
 
 HYDRA_ARGS=(
   "hydra.searchpath=[file://$POLICY_CONFIGS]"
@@ -42,8 +43,8 @@ HYDRA_ARGS=(
   experiment=alpamayo_1_5_clrl_test_run
   policy.model.path="$BASE/alpagym/tmp/checkpoints/alpamayo-1.5-10B_alpagym_ckpt"
 
-  # Minimal-steps override: just prove the loop closes.
-  cosmos.train.max_num_steps=1
+  # Step count comes from $2; the default of 1 just proves the loop closes.
+  cosmos.train.max_num_steps=$STEPS
   cosmos.train.num_epochs=1
 
   cache_root_dir="$CACHE"

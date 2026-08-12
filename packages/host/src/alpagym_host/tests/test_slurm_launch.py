@@ -13,8 +13,16 @@ from alpagym_host.slurm import (
 )
 
 
-def test_build_wizard_srun_command_uses_slurm_gpu_binding_without_cuda_mask() -> None:
-    """AlpaSim placement uses Slurm GPU binding instead of shell CUDA masks."""
+def test_build_wizard_srun_command_gives_the_wizard_every_gpu_on_the_host() -> None:
+    """The Wizard step must see ALL of the host's GPUs, not just AlpaSim's share.
+
+    A mask here constrains only the Wizard's own id validation, which it does against its
+    RENUMBERED view (0..n-1). Service placement is not constrained at all: the Wizard spawns each
+    service with its own `srun --overlap` carrying no GPU flags, so a service inherits the whole
+    allocation and picks its device from `CUDA_VISIBLE_DEVICES=<physical topology id>`. Masking
+    therefore rejects exactly the ids that would land correctly, and accepts ids that land on the
+    trainer's GPUs.
+    """
     host = RunHostPlan(
         hostname="mixed-0",
         host_index=1,
@@ -32,8 +40,10 @@ def test_build_wizard_srun_command_uses_slurm_gpu_binding_without_cuda_mask() ->
     )
 
     assert "--nodelist=mixed-0" in command
-    assert "--gpus-per-task=4" in command
-    assert "--gpu-bind=mask_gpu:0xf0" in command
+    # 4 AlpaSim + 4 cosmos: the whole host, so a physical id means the same thing inside the
+    # Wizard's view as it does in the topology config.
+    assert "--gpus-per-task=8" in command
+    assert not any(arg.startswith("--gpu-bind") for arg in command)
     assert "CUDA_VISIBLE_DEVICES" not in " ".join(command)
 
 
