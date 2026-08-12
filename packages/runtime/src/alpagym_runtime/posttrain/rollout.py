@@ -315,8 +315,10 @@ class AlpagymRollout(WeightReceiverBase):
 def build_alpagym_rollout(config: Any) -> AlpagymRollout:
     """Construct the AlpaGym rollout body from the entry's config.
 
-    `config.alpagym.resolved_config_path` points at the run config AlpaGym's host CLI already
-    resolved -- the same file `cosmos/entrypoint.py` reads today. Milestone 1 deliberately does not
-    route this through i4's config root; see the design doc's §8.2.
+    `config` is the entry's `AlpagymSection`, whose `resolved_config_path` points at the run config
+    AlpaGym's host CLI already resolved -- the same file `cosmos/entrypoint.py` reads today. It is
+    that section rather than the whole `EntryConfig` because the loop's own fields (gpus, steps,
+    batch shape) mean nothing to a role body. Milestone 1 deliberately does not route this through
+    i4's config root; see the design doc's §8.2.
     """
-    return AlpagymRollout(load_run_config(Path(config.alpagym.resolved_config_path)))
+    return AlpagymRollout(load_run_config(Path(config.resolved_config_path)))
