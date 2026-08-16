@@ -439,6 +439,11 @@ def _build_cosmos_launcher_command(
     if no_sync:
         launcher_args.extend(["--package", "alpagym-runtime"])
     group_size = int(config.cosmos.rollout.n_generation)
+    # The entry DERIVES its prompt count as `train_batch_per_replica // group_size`; this is the
+    # early gate on the same divisibility, kept here because it fails before Slurm allocates
+    # anything and before ten simulator services come up, where the entry's own check fires only
+    # after bring-up. A partial group would reach the group-relative advantage estimator and skew
+    # its per-prompt mean and std.
     train_batch = int(config.cosmos.train.train_batch_per_replica)
     if train_batch % group_size:
         raise ValueError(
@@ -457,8 +462,6 @@ def _build_cosmos_launcher_command(
             str(cosmos_gpus),
             "--steps",
             str(config.cosmos.train.max_num_steps),
-            "--prompts-per-step",
-            str(train_batch // group_size),
             "--group-size",
             str(group_size),
         ]

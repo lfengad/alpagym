@@ -136,8 +136,6 @@ def test_execute_run_runs_local_process_lifecycle(
             "0",
             "--steps",
             "1",
-            "--prompts-per-step",
-            "1",
             "--group-size",
             "1",
         ]
