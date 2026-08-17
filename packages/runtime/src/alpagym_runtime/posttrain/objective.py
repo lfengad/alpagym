@@ -24,7 +24,7 @@ from typing import Any, Callable
 
 import torch
 from projects.cosmos3.posttrain.algorithm.annotators.advantage import require_advantages
-from projects.cosmos3.posttrain.algorithm.objective import Objective, Reduction
+from projects.cosmos3.posttrain.algorithm.primitives.objective import Objective, Reduction
 from projects.cosmos3.posttrain.schema import Trajectory
 
 from alpagym_runtime.replay import stack_step_model_inputs
@@ -146,13 +146,13 @@ def make_alpagym_objective(
         with torch.no_grad():
             clipped = (ratio < 1.0 - ratio_clip_low) | (ratio > 1.0 + ratio_clip_high)
             metrics = {
-                "policy_loss": float(policy_loss.detach()),
-                "kl_loss": float(kl_loss.detach()),
-                "ratio_min": float(ratio.min()),
-                "ratio_max": float(ratio.max()),
-                "clip_fraction": float(clipped.float().mean()),
-                "advantage_mean": float(advantages.mean()),
-                "rows": len(rows),
+                "train/policy_loss": float(policy_loss.detach()),
+                "train/kl_loss": float(kl_loss.detach()),
+                "train/ratio_min": float(ratio.min()),
+                "train/ratio_max": float(ratio.max()),
+                "train/clip_fraction": float(clipped.float().mean()),
+                "train/advantage_mean": float(advantages.mean()),
+                "train/rows": len(rows),
             }
         return loss, metrics
 

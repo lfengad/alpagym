@@ -292,15 +292,24 @@ class AlpagymRollout(WeightReceiverBase):
         config rather than from live objects, so the identity is the same before and after the
         engine thread starts.
         """
+        from projects.cosmos3.posttrain.utils.identity import normalize_typed_json_dict
+
         sim = self._run_config.alpasim.wizard_args
-        return {
-            "policy_kind": str(self._run_config.policy.model.kind),
-            "policy_path": str(self._run_config.policy.model.path),
-            "n_sim_steps": int(sim.n_sim_steps),
-            "control_timestep_us": int(sim.control_timestep_us),
-            "force_gt_duration_us": int(sim.force_gt_duration_us),
-            "expected_valid_steps": int(self._run_config.expected_valid_steps),
-        }
+        # Through `normalize_typed_json_dict`, the same projection `config/build.py` puts the vLLM
+        # rollout's identity through: it is what ENFORCES the protocol's "stable finite JSON" --
+        # canonical key order, no NaN/Inf, no Python bool/number coercion. Hand-built `int()`/`str()`
+        # calls merely happen to satisfy it today.
+        return normalize_typed_json_dict(
+            {
+                "policy_kind": self._run_config.policy.model.kind,
+                "policy_path": self._run_config.policy.model.path,
+                "n_sim_steps": sim.n_sim_steps,
+                "control_timestep_us": sim.control_timestep_us,
+                "force_gt_duration_us": sim.force_gt_duration_us,
+                "expected_valid_steps": self._run_config.expected_valid_steps,
+            },
+            context="AlpaGym rollout validation semantics",
+        )
 
     def weight_version(self) -> int:
         """The training iteration whose weights this rollout currently holds.

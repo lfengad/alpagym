@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from alpagym_runtime.posttrain.objective import make_alpagym_objective
-from projects.cosmos3.posttrain.algorithm.objective import Reduction
+from projects.cosmos3.posttrain.algorithm.primitives.objective import Reduction
 from projects.cosmos3.posttrain.schema import ObsBundle, Trajectory, Transition
 
 _CLIPS = {"ratio_clip_low": 0.2, "ratio_clip_high": 0.2}
@@ -88,7 +88,10 @@ def test_loss_is_finite_and_differentiable() -> None:
     assert torch.isfinite(loss)
     loss.backward()
     assert model.shift.grad is not None and torch.isfinite(model.shift.grad)
-    assert set(metrics) >= {"ratio_min", "ratio_max", "clip_fraction", "rows"}
+    # Namespaced: `schema/metrics.py::validate_public_metric_keys` rejects a bare key, and the
+    # reporter validates every frame -- a rename here fails the run at the first report, not at
+    # the first metric read.
+    assert set(metrics) >= {"train/ratio_min", "train/ratio_max", "train/clip_fraction", "train/rows"}
 
 
 def test_positive_advantage_pushes_logprob_up() -> None:
@@ -111,7 +114,7 @@ def test_rows_are_flattened_across_trajectories() -> None:
     _, metrics = objective(
         _ShiftModel(), [_trajectory(4, advantage=1.0), _trajectory(3, advantage=1.0)]
     )
-    assert metrics["rows"] == 7
+    assert metrics["train/rows"] == 7
 
 
 def test_missing_advantage_raises_rather_than_defaulting_to_zero() -> None:
@@ -127,3 +130,19 @@ def test_empty_batch_raises() -> None:
     objective = make_alpagym_objective(_build_model_inputs, **_CLIPS, **_OFF)
     with pytest.raises(ValueError, match="empty batch"):
         objective(_ShiftModel(), [])
+
+
+def test_reduction_is_the_one_the_trainer_dispatches_on() -> None:
+    """The objective's `Reduction` must be the enum `backward` compares against, BY IDENTITY.
+
+    `algorithm/primitives/objective.py::backward` dispatches with `is`, and posttrain carries a
+    SECOND, unrelated `Reduction` -- `schema/metrics.py` aliases `MetricReduction` under that name
+    for metric roll-up. When the objective module moved under `primitives/`, this file's old import
+    path resolved to that other enum: the import succeeded, every type check passed, and the run
+    died three steps in with `AssertionError: unhandled reduction Reduction.MEAN`. Identity is the
+    only assertion that catches it.
+    """
+    from projects.cosmos3.posttrain.algorithm.primitives.objective import Reduction as TrainerReduction
+
+    objective = make_alpagym_objective(_build_model_inputs, **_CLIPS, **_OFF)
+    assert objective.reduction is TrainerReduction.MEAN
