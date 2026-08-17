@@ -281,6 +281,27 @@ class AlpagymRollout(WeightReceiverBase):
             for name, param in self.model.named_parameters()
         }
 
+    def validation_semantics_identity(self) -> dict[str, Any]:
+        """Every non-weight generation semantic, as stable finite JSON (`roles/rollout/base.py`).
+
+        A resumed run must produce the same rollouts from the same weights, and this is what a
+        validation check compares to prove it. What decides an AlpaGym rollout is NOT an HF
+        generation config -- the policy runs a 22-tick closed loop against a simulator -- so the
+        fields are the ones that would change the trajectory: which policy, which simulator scene
+        set, and the closed-loop timing the wizard was brought up with. Read from the resolved run
+        config rather than from live objects, so the identity is the same before and after the
+        engine thread starts.
+        """
+        sim = self._run_config.alpasim.wizard_args
+        return {
+            "policy_kind": str(self._run_config.policy.model.kind),
+            "policy_path": str(self._run_config.policy.model.path),
+            "n_sim_steps": int(sim.n_sim_steps),
+            "control_timestep_us": int(sim.control_timestep_us),
+            "force_gt_duration_us": int(sim.force_gt_duration_us),
+            "expected_valid_steps": int(self._run_config.expected_valid_steps),
+        }
+
     def weight_version(self) -> int:
         """The training iteration whose weights this rollout currently holds.
 
