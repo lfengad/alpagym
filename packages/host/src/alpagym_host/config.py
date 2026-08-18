@@ -315,6 +315,12 @@ class CosmosRLConfig:
     """Cosmos-RL launch settings for local smoke runs."""
 
     mode: CosmosRLMode
+    # SEPARATE from `mode`, which the host pins to `disaggregated` for every Slurm run
+    # (config_validation) and pairs with `transport: nccl` in the topology presets. Both rules
+    # describe cosmos-rl's controller/worker split, which Ray replaced; neither says anything
+    # about whether posttrain's trainer and rollout share GPUs. Overloading `mode` therefore made
+    # the colocated layout unreachable under Slurm.
+    placement: CosmosRLMode
     launch: CosmosRLLaunchConfig
     train: CosmosRLTrainConfig
     policy: CosmosRLPolicyConfig

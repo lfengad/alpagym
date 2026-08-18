@@ -343,7 +343,6 @@ def _build_cosmos_command(
         return _build_cosmos_launcher_command(
             config,
             project_root=alpagym_project_root(),
-            no_sync=False,
             cosmos_gpus=topology.cosmos_host_plans[0].cosmos_gpus,
         )
 
@@ -359,7 +358,6 @@ def _build_cosmos_command(
         _build_cosmos_launcher_command(
             config,
             project_root=Path(config.execution.slurm.container_workdir),
-            no_sync=True,
             cosmos_gpus=cosmos_hosts[0].cosmos_gpus,
         )
     ]
@@ -402,10 +400,24 @@ def _log_topology(topology: RunTopologyPlan) -> None:
         )
 
 
+def _venv_python(config: RunConfig, project_root: Path) -> Path:
+    """The interpreter to exec, derived from wherever `UV_PROJECT_ENVIRONMENT` points.
+
+    Read from `execution.slurm.export_env` rather than hardcoded: that list is what actually puts
+    the variable in the step's environment and what `uv sync` obeys, so reading it keeps ONE source
+    of truth for where the venv is. Absent (a local, non-Slurm run) means uv's default, the
+    project's own `.venv`.
+    """
+    for assignment in config.execution.slurm.export_env:
+        name, separator, value = assignment.partition("=")
+        if separator and name == "UV_PROJECT_ENVIRONMENT":
+            return Path(value) / "bin" / "python"
+    return Path(project_root) / ".venv" / "bin" / "python"
+
+
 def _build_cosmos_launcher_command(
     config: RunConfig,
     project_root: Path,
-    no_sync: bool,
     cosmos_gpus: int,
 ) -> list[str]:
     """Build the command that runs the closed-loop RL half of the run.
@@ -424,20 +436,19 @@ def _build_cosmos_launcher_command(
         config: the resolved run config; the entry re-reads it from disk inside each Ray actor.
         project_root: the uv project to run from -- the checkout on the host, or the container
             workdir under Slurm.
-        no_sync: skip uv's dependency sync (the Slurm step syncs once, before this command).
         cosmos_gpus: GPUs available to the cosmos half of the node.
     """
-    command = ["uv", "run"]
-    if no_sync:
-        command.append("--no-sync")
-    else:
-        command.append("--all-packages")
-    launcher_args = [
-        "--project",
-        str(project_root),
-    ]
-    if no_sync:
-        launcher_args.extend(["--package", "alpagym-runtime"])
+    # The venv's interpreter DIRECTLY, not `uv run`. Ray ships a uv integration hook that fires
+    # whenever the driver was started by uv: it builds a runtime_env carrying a `working_dir` and a
+    # `py_executable` that re-invokes uv, so every actor is a FRESH process that does not inherit
+    # what the launcher exported. NIXL then finds no `UCX_TLS` and fails to create its backend --
+    # with no mention of the environment anywhere in the error. The disaggregated example
+    # (`examples/run_vllm_disagg_nixl.sh`) avoids the hook the same way, and its `[ -x "$PY" ]`
+    # check exists for exactly this reason.
+    #
+    # Dependency management is NOT given up: the Slurm step still runs `uv sync --frozen` before
+    # this command (see `_cosmos_launcher_script`), so the venv is exactly what the lock pins. Only
+    # the INVOCATION changes.
     group_size = int(config.cosmos.rollout.n_generation)
     # The entry DERIVES its prompt count as `train_batch_per_replica // group_size`; this is the
     # early gate on the same divisibility, kept here because it fails before Slurm allocates
@@ -451,29 +462,21 @@ def _build_cosmos_launcher_command(
             "a partial group would reach the group-relative advantage estimator and skew its "
             "per-prompt mean and std"
         )
-    launcher_args.extend(
-        [
-            "python",
-            "-m",
-            "projects.cosmos3.posttrain.entrypoints.alpagym_clrl",
-            "--resolved-config",
-            str(config.artifact_paths.resolved_config_path),
-            "--gpus",
-            str(cosmos_gpus),
-            "--steps",
-            str(config.cosmos.train.max_num_steps),
-            "--group-size",
-            str(group_size),
-            # `cosmos.mode` already carried this distinction for the cosmos-rl launcher, and it
-            # means the same thing on the GPU axis (DESIGN 4.0): whether the trainer and the
-            # rollout occupy the same physical GPUs. Passing it through rather than adding a
-            # second knob keeps ONE place to choose the layout.
-            "--placement",
-            str(config.cosmos.mode),
-        ]
-    )
-    command.extend(launcher_args)
-    return command
+    return [
+        str(_venv_python(config, project_root)),
+        "-m",
+        "projects.cosmos3.posttrain.entrypoints.alpagym_clrl",
+        "--resolved-config",
+        str(config.artifact_paths.resolved_config_path),
+        "--gpus",
+        str(cosmos_gpus),
+        "--steps",
+        str(config.cosmos.train.max_num_steps),
+        "--group-size",
+        str(group_size),
+        "--placement",
+        str(config.cosmos.placement),
+    ]
 
 
 def _ensure_wizard_processes_running(processes: list[subprocess.Popen[str]]) -> None:

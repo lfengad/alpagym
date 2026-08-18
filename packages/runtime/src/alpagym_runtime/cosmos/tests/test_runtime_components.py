@@ -119,6 +119,7 @@ def _write_resolved_config(
         },
         "cosmos": {
             "mode": "colocated",
+            "placement": "colocated",
             "launch": {
                 "policy_replicas": 1,
                 "rollout_replicas": rollout_replicas,

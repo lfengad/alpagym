@@ -122,12 +122,10 @@ def test_execute_run_runs_local_process_lifecycle(
     assert scene_ids == {"scene_ids": ["scene_b", "scene_a"]}
     assert commands == [
         [
-            "uv",
-            "run",
-            "--all-packages",
-            "--project",
-            str(run_lifecycle.alpagym_project_root()),
-            "python",
+            # The venv's interpreter, NOT `uv run`: Ray's uv hook would otherwise rebuild every
+            # actor process with a `working_dir` runtime env, and the launcher's exported
+            # environment (UCX_TLS, LD_LIBRARY_PATH) would not reach them.
+            str(run_lifecycle.alpagym_project_root() / ".venv" / "bin" / "python"),
             "-m",
             "projects.cosmos3.posttrain.entrypoints.alpagym_clrl",
             "--resolved-config",
@@ -499,3 +497,30 @@ def _write_model_bundle_dir(tmp_path: Path) -> Path:
     (bundle_dir / "config.json").write_text("{}", encoding="utf-8")
     (bundle_dir / "model.safetensors").write_text("weights", encoding="utf-8")
     return bundle_dir
+
+
+def test_container_run_execs_the_interpreter_uv_project_environment_names() -> None:
+    """Under Slurm the command must exec the CONTAINER venv, not the host checkout's `.venv`.
+
+    `UV_PROJECT_ENVIRONMENT` in `export_env` is what `uv sync` obeys, so it is the only thing that
+    says where the synced interpreter actually is. Deriving the path from anywhere else -- a
+    literal, or the project root -- gives a python that either does not exist or has none of the
+    run's dependencies, and the failure surfaces inside a Slurm step as a bare ImportError.
+    """
+    from types import SimpleNamespace
+
+    from alpagym_host import run_lifecycle
+
+    config = SimpleNamespace(
+        execution=SimpleNamespace(
+            slurm=SimpleNamespace(export_env=["FOO=bar", "UV_PROJECT_ENVIRONMENT=/opt/venv"])
+        )
+    )
+    assert run_lifecycle._venv_python(config, Path("/host/checkout")) == Path(
+        "/opt/venv/bin/python"
+    )
+
+    config.execution.slurm.export_env = ["FOO=bar"]
+    assert run_lifecycle._venv_python(config, Path("/host/checkout")) == Path(
+        "/host/checkout/.venv/bin/python"
+    )
