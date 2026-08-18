@@ -464,6 +464,12 @@ def _build_cosmos_launcher_command(
             str(config.cosmos.train.max_num_steps),
             "--group-size",
             str(group_size),
+            # `cosmos.mode` already carried this distinction for the cosmos-rl launcher, and it
+            # means the same thing on the GPU axis (DESIGN 4.0): whether the trainer and the
+            # rollout occupy the same physical GPUs. Passing it through rather than adding a
+            # second knob keeps ONE place to choose the layout.
+            "--placement",
+            str(config.cosmos.mode),
         ]
     )
     command.extend(launcher_args)

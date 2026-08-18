@@ -138,6 +138,8 @@ def test_execute_run_runs_local_process_lifecycle(
             "1",
             "--group-size",
             "1",
+            "--placement",
+            "colocated",
         ]
     ]
     assert f"Starting Cosmos launcher command: {commands[0]}" in caplog.messages

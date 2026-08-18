@@ -501,6 +501,12 @@ class SlurmConfig:
     # environment once shadowed the pinned cosmos-rl revision (see the runbook), and appending
     # would reintroduce exactly that.
     posttrain_repo_root: str | None = None
+    # `KEY=VALUE` exported INSIDE the Cosmos launcher script, for the same reason as
+    # `posttrain_repo_root` and one more: `srun --export` separates variables with COMMAS, so a
+    # value containing one is split into fragments that Slurm then drops as nameless. UCX needs
+    # exactly such values (`UCX_TLS=rc_mlx5,dc_mlx5,...`), and the symptom is not a parse error --
+    # the actor simply receives a truncated transport list and NIXL fails with NIXL_ERR_BACKEND.
+    script_env: list[str] = field(default_factory=list)
     qos: str | None = None
     mem: str | None = None
     # Requeue the job on the pre-timeout SIGUSR1 and resume from the latest

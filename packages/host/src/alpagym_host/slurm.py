@@ -128,6 +128,7 @@ def build_cosmos_srun_command(
                 workspace_sync_command=workspace_sync_command,
                 worker_commands=worker_commands,
                 posttrain_repo_root=slurm.posttrain_repo_root,
+                script_env=slurm.script_env,
             ),
         ]
     )
@@ -138,6 +139,7 @@ def _cosmos_launcher_script(
     workspace_sync_command: list[str],
     worker_commands: tuple[list[str], ...],
     posttrain_repo_root: str | None = None,
+    script_env: list[str] | None = None,
 ) -> str:
     """Render the per-task dispatcher for one multi-task Cosmos Slurm step.
 
@@ -153,9 +155,19 @@ def _cosmos_launcher_script(
     Assigning the one path the entry needs -- the repo holding
     `projects.cosmos3.posttrain`, which imports absolutely -- keeps that door shut;
     with no root configured the variable is cleared outright.
+
+    `ALPAGYM_EXTRA_PYTHONPATH` is the ONE sanctioned way to widen it, and it is read HERE rather
+    than exported as `PYTHONPATH` because this assignment would clobber that: the disaggregated
+    placement needs NIXL's Python bindings, which live outside the venv (installed `--no-deps` so
+    they cannot shadow the torch vLLM was compiled against). Anything else on the way in is still
+    dropped.
     """
+    extra = "${ALPAGYM_EXTRA_PYTHONPATH:+:$ALPAGYM_EXTRA_PYTHONPATH}"
     lines = [
-        f"export PYTHONPATH={shlex.quote(posttrain_repo_root)}"
+        # BEFORE the PYTHONPATH assignment: that line expands `ALPAGYM_EXTRA_PYTHONPATH`, and a
+        # variable set afterwards expands to nothing -- the widening silently does not happen.
+        *(f"export {shlex.quote(assignment)}" for assignment in (script_env or [])),
+        f'export PYTHONPATH={shlex.quote(posttrain_repo_root)}"{extra}"'
         if posttrain_repo_root
         else "unset PYTHONPATH",
         shlex.join(workspace_sync_command),

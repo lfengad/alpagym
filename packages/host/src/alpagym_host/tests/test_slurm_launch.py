@@ -221,19 +221,25 @@ def _slurm_config(*, exclusive: bool = True) -> SlurmConfig:
 
 
 def test_posttrain_repo_root_is_assigned_to_pythonpath() -> None:
-    """PYTHONPATH is ASSIGNED, never appended to.
+    """PYTHONPATH is ASSIGNED, never appended to -- except through the one named door.
 
     The Cosmos step runs under `bash -lc`, so the login shell has already run; a checkout leaking
     in that way once shadowed the pinned cosmos-rl revision (see ALPAGYM_RUNBOOK.md). Appending
     would reopen exactly that door, and `srun --export` cannot win against the login shell either
     -- which is why this is set in the script rather than in `export_env`.
+
+    `ALPAGYM_EXTRA_PYTHONPATH` widens it deliberately (NIXL's bindings live outside the venv), and
+    the distinction that keeps the invariant is that the script never reads `$PYTHONPATH` itself:
+    whatever the login shell exported is still dropped, and only what the launcher was explicitly
+    handed survives.
     """
     script = _cosmos_launcher_script(
         workspace_sync_command=["uv", "sync"],
         worker_commands=(["python", "-m", "projects.cosmos3.posttrain.entrypoints.alpagym_clrl"],),
         posttrain_repo_root="/repo/imaginaire4",
     )
-    assert script.startswith("export PYTHONPATH=/repo/imaginaire4\n")
+    assert script.startswith('export PYTHONPATH=/repo/imaginaire4"${ALPAGYM_EXTRA_PYTHONPATH:+:$ALPAGYM_EXTRA_PYTHONPATH}"\n')
+    # The inherited value is still dropped: only the named extra can widen it.
     assert "$PYTHONPATH" not in script
 
 
@@ -244,3 +250,28 @@ def test_pythonpath_is_cleared_when_no_repo_root_is_configured() -> None:
         worker_commands=(["python", "-m", "whatever"],),
     )
     assert script.startswith("unset PYTHONPATH\n")
+
+
+def test_script_env_carries_values_srun_export_would_split() -> None:
+    """A value containing a comma must be exported INSIDE the script, not via `srun --export`.
+
+    `--export` separates variables with commas, so `UCX_TLS=rc_mlx5,dc_mlx5,cuda_copy` reaches
+    Slurm as one assignment plus two nameless fragments, which it drops. Nothing warns: the actor
+    simply gets `UCX_TLS=rc_mlx5` -- no tcp for agent wireup, no CUDA transports -- and NIXL then
+    fails with NIXL_ERR_BACKEND, which reads exactly like a missing library.
+    """
+    script = _cosmos_launcher_script(
+        workspace_sync_command=["uv", "sync"],
+        worker_commands=(["python", "-m", "whatever"],),
+        posttrain_repo_root="/repo/imaginaire4",
+        script_env=["UCX_TLS=rc_mlx5,dc_mlx5,cuda_copy", "UCX_MAX_RMA_RAILS=4"],
+    )
+    # A comma is not special to the shell, so `shlex.quote` leaves it bare -- what matters is that
+    # the WHOLE value survives as one assignment, which is exactly what `--export` would not do.
+    assert "export UCX_TLS=rc_mlx5,dc_mlx5,cuda_copy\n" in script
+    assert "export UCX_MAX_RMA_RAILS=4\n" in script
+    # BEFORE the PYTHONPATH line: that line expands `ALPAGYM_EXTRA_PYTHONPATH`, so exporting it
+    # afterwards widens nothing and NIXL's bindings stay invisible -- with no error, just an
+    # `ImportError: No module named 'nixl'` from inside a Ray actor.
+    assert script.index("UCX_TLS") < script.index("export PYTHONPATH")
+    assert script.index("export PYTHONPATH") < script.index("uv sync")
