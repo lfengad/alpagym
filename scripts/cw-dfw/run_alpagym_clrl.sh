@@ -41,33 +41,48 @@ PLACEMENT=${3:-colocated}  # cosmos.mode: colocated (IPC weight edge) | disaggre
 #  - `nixl` needs BOTH the dispatch shim and the matching `nixl-cuXX` backend, installed with
 #    --no-deps into their own directory: a plain install pulls a newer torch that SHADOWS the
 #    venv's, which flash-attn and vllm were compiled against. Reproduce $NIXL_EXTRA with:
-#      uv pip install --target $NIXL_EXTRA --no-deps nixl nixl-cu12 cupy-cuda12x
+#      uv pip install --target $NIXL_EXTRA --no-deps --python-version 3.12 \
+#        nixl nixl-cu12 cupy-cuda12x 'cuda-bindings<13'
+#    --python-version is NOT optional: run from the login host without it, uv resolves for the
+#    login host's interpreter and lays down cp313 extension modules that the container's 3.12
+#    cannot load -- `cuda.bindings` then imports but has no `driver`. `cuda-bindings` is pinned
+#    below 13 to stay on the container's CUDA 12 line, and it is needed because `_fabric_buffer`
+#    allocates the staging buffer through the driver API.
 #    It rides ALPAGYM_EXTRA_PYTHONPATH, not PYTHONPATH: the launcher ASSIGNS PYTHONPATH (so a
 #    login shell cannot shadow the pinned cosmos-rl) and would clobber anything sent directly.
-#  - The UCX comes from the CONTAINER (/usr/local/ucx), NOT from a `libucx-cu12` wheel. Measured
-#    on this image with `ucx_info -d`: the container reports cuda_copy, cuda_ipc, gdr_copy,
-#    rc_mlx5 and dc_mlx5; the wheel reports only tcp, self, sysv and posix, and NIXL then warns
-#    "UCX CUDA support was not found! GPU memory is not supported" -- which is fatal here,
-#    because weight sync moves GPU tensors. Put the container's lib FIRST.
-#  - UCX_TLS must include tcp: agent wireup needs an auxiliary transport, and without one the
-#    error is the unhelpful "no auxiliary transport to <no debug data>".
-#  - UCX_NET_DEVICES must name devices UCX itself reports (`ucx_info -d`), not whatever `ip link`
-#    shows: this node's Ethernet is `ibp26s0`, and naming a device UCX does not list silently
-#    removes it from the candidate set. "all" is equally wrong -- UCX may advertise a
-#    non-routable address and the peer then times out inside add_remote_agent.
-#  - The UCX values go through `script_env`, NOT `export_env`: `srun --export` separates variables
-#    with COMMAS, and `UCX_TLS=rc_mlx5,dc_mlx5,...` contains them, so Slurm splits the value into
-#    fragments and drops the nameless ones. The actor then receives UCX_TLS=rc_mlx5 alone -- no tcp
-#    for wireup, no cuda transports -- and NIXL fails with the same NIXL_ERR_BACKEND as a missing
-#    library. `script_env` is exported inside the launcher script, where a comma is just a comma.
+#  - The UCX in play is the one VENDORED IN THE WHEEL, and nothing can point NIXL at another.
+#    auditwheel rewrote the plugin's dependencies to hash-renamed private copies -- `ldd` on
+#    .nixl_cu12.mesonpy.libs/plugins/libplugin_UCX.so resolves libucp-5c599099.so.0.0.0 out of
+#    nixl_cu12.libs by RPATH -- so LD_LIBRARY_PATH cannot redirect it. That build is stripped:
+#    it reports only mm, posix, self, shm, sm, sysv and tcp. Naming rc_mlx5, dc_mlx5, cuda_copy
+#    or cuda_ipc in UCX_TLS just earns "transports ... are not available".
+#    CONSEQUENCE, and the reason this is a stopgap: with no cuda_copy/cuda_ipc, UCX warns "GPU
+#    memory is not supported", so weight sync crosses host memory instead of going GPU to GPU.
+#    Correctness first; a wheel built against the container's UCX is what makes it fast.
+#  - STATUS: disaggregated does NOT complete a step on this cluster, and the blocker is the
+#    wheel, not this script. Everything below gets NIXL through agent creation, plan install and
+#    buffer allocation; the first weight sync then HANGS -- no error, no log, the step sits in
+#    ray.wait until Slurm kills it. That is the vendored UCX having no CUDA transport: it cannot
+#    move a GPU tensor, and says so only as the warning quoted above. Closing this needs a nixl
+#    built against the container's UCX (which does have cuda_copy/cuda_ipc). Building v1.4.0 from
+#    source was tried and fails in nixl's own logging header -- the container's glog is not the
+#    one its CI builds with -- so it is packaging work, not a knob. Use colocated meanwhile.
+#  - UCX_NET_DEVICES=lo, and this is the one that actually decides whether the run starts.
+#    Everything here is single-node, so the agent's intra-agent wireup connects to ITSELF. The
+#    shared-memory transports are all rejected for it ("no peer failure handler"), leaving tcp,
+#    and tcp only works over an address the process can route back to. Every IB-over-Ethernet
+#    device on this node (ibp26s0 et al) and the Ethernet port (enp90s0np0) advertise addresses
+#    that are NOT locally routable -- "no route to 100.126.37.129:65535" -- and the backend then
+#    fails to create with a bare NIXL_ERR_BACKEND. Loopback always routes.
+#    This only bites once torch.distributed/NCCL is up, which is why it looks like a trainer-only
+#    fault: a fresh process picks a workable device on its own.
 NIXL_EXTRA=${NIXL_EXTRA:-$BASE/nixl_extra}
 SCRIPT_ENV=""
 if [ "$PLACEMENT" = "disaggregated" ]; then
   SCRIPT_ENV="\"ALPAGYM_EXTRA_PYTHONPATH=$NIXL_EXTRA\""
-  SCRIPT_ENV="$SCRIPT_ENV,\"LD_LIBRARY_PATH=/usr/local/ucx/lib\""
-  SCRIPT_ENV="$SCRIPT_ENV,\"UCX_TLS=rc_mlx5,dc_mlx5,cuda_copy,cuda_ipc,sm,self,tcp\""
-  SCRIPT_ENV="$SCRIPT_ENV,\"UCX_NET_DEVICES=mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,ibp26s0\""
-  SCRIPT_ENV="$SCRIPT_ENV,\"UCX_MAX_RMA_RAILS=4\",\"UCX_LOG_LEVEL=error\""
+  SCRIPT_ENV="$SCRIPT_ENV,\"UCX_TLS=tcp,self,sm,posix,sysv\""
+  SCRIPT_ENV="$SCRIPT_ENV,\"UCX_NET_DEVICES=lo\""
+  SCRIPT_ENV="$SCRIPT_ENV,\"UCX_LOG_LEVEL=error\""
   [ -d "$NIXL_EXTRA/nixl" ] || { echo "NIXL_EXTRA=$NIXL_EXTRA has no nixl/ (see the pip line above)" >&2; exit 1; }
 fi
 
@@ -83,7 +98,10 @@ HYDRA_ARGS=(
   cosmos.train.max_num_steps=$STEPS
   # colocated: every GPU carries an FSDP shard AND an engine. disaggregated: trainer and rollout
   # split the GPUs in half, the layout cosmos-rl ran -- reaches the entry as `--placement`.
-  cosmos.mode=$PLACEMENT
+  # NOT `cosmos.mode`: the host pins that to `disaggregated` for every Slurm run and the topology
+  # preset pairs it with `transport: nccl`, both of which describe cosmos-rl's process split
+  # rather than posttrain's GPU layout.
+  cosmos.placement=$PLACEMENT
   cosmos.train.num_epochs=1
 
   cache_root_dir="$CACHE"
