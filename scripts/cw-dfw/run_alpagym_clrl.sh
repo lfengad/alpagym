@@ -59,22 +59,29 @@ PLACEMENT=${3:-colocated}  # cosmos.mode: colocated (IPC weight edge) | disaggre
 #    CONSEQUENCE, and the reason this is a stopgap: with no cuda_copy/cuda_ipc, UCX warns "GPU
 #    memory is not supported", so weight sync crosses host memory instead of going GPU to GPU.
 #    Correctness first; a wheel built against the container's UCX is what makes it fast.
-#  - STATUS: disaggregated does NOT complete a step on this cluster, and WHY is still open.
-#    Everything below gets NIXL through agent creation, plan install and buffer allocation; the
-#    first weight sync then HANGS -- no error, no log, the step sits in ray.wait until Slurm
-#    kills it. Ruled out so far, each measured rather than reasoned:
-#      * missing CUDA transports in the wheel -- libuct_cuda.so and libucm_cuda.so ARE shipped
-#        (nixl_cu12.libs/ucx) and their dependencies resolve;
-#      * UCX not finding them -- ai-dynamo/nixl#1628 describes exactly that and its workaround
-#        (UCX_TLS + UCX_MODULE_DIR, both set below) does not lift the hang here;
-#      * the wheel version -- 1.3.2 behaves the same as 1.4.0;
-#      * the device list -- adding `cuda` alongside `lo` changes nothing.
-#    NIXL still logs "UCX CUDA support was not found", but that warning is NOT a reliable
-#    signal: #1628's reporter had a working setup that kept printing it. Do not chase it.
-#    Untried and cheap, in order: nixl-cu12==1.0.0 (#1628 calls it unaffected), and comparing
-#    against the environment the upstream example actually runs in (examples/run_vllm_disagg_nixl
-#    .sh points at /opt/venv/cosmos_rl with cu13 wheels -- this container is CUDA 12.8).
-#    Use colocated meanwhile; it is verified.
+#  - STATUS: disaggregated still does NOT complete a step, but the failure is now HALF
+#    understood and there is a 90-second reproducer for the understood half.
+#    FOUND: Ray only creates the `_ray_system` background thread -- the one RDT runs transfers
+#    on -- when the actor asks for it with `enable_tensor_transport=True` (ray/actor.py, and see
+#    the flag now set on posttrain's `_Host`). Ray also infers it from a method decorated
+#    `@ray.method(tensor_transport=...)`, which posttrain has none of: it stages through
+#    `ray.put(_tensor_transport="nixl")` inside the actor, which Ray cannot see. Without the flag
+#    a publication is accepted and then never moves, and NOTHING logs an error, because the same
+#    flag creates `_ray_system_error` and Ray's error path check-fails without it. Reproduce in
+#    ~90s: two `@ray.remote(num_gpus=1)` actors, the producer returning a CUDA tensor from a
+#    method decorated `tensor_transport="nixl"`. Without the flag the consumer times out with
+#    "not found in RDT object store"; with it the tensor arrives.
+#    STILL OPEN: the real run hangs at the first weight sync even with the flag set, so
+#    something else is also wrong. Ruled out, each measured: missing CUDA transports in the
+#    wheel (libuct_cuda.so and libucm_cuda.so ARE shipped and their deps resolve); UCX not
+#    finding them (ai-dynamo/nixl#1628's UCX_MODULE_DIR workaround, set below, does not lift it);
+#    the wheel version (1.3.2 same, 1.0.0 fails earlier at agent creation); the device list
+#    (unset / lo / all / lo,cuda all identical); publishing overlapping views of one buffer (a
+#    fresh tensor per call fails the same way).
+#    Note for whoever picks this up: getting Ray's worker logs off this node defeated four
+#    attempts -- ray.init uses log_to_driver=False, the container's /tmp dies with the container,
+#    Ray re-points worker fd 2 after sitecustomize runs, and neither _temp_dir nor RAY_TMPDIR
+#    moved the session dir. Solve that first; everything above was inferred without it.
 #  - UCX_NET_DEVICES=lo, and this is the one that actually decides whether the run starts.
 #    Everything here is single-node, so the agent's intra-agent wireup connects to ITSELF. The
 #    shared-memory transports are all rejected for it ("no peer failure handler"), leaving tcp,
