@@ -59,14 +59,22 @@ PLACEMENT=${3:-colocated}  # cosmos.mode: colocated (IPC weight edge) | disaggre
 #    CONSEQUENCE, and the reason this is a stopgap: with no cuda_copy/cuda_ipc, UCX warns "GPU
 #    memory is not supported", so weight sync crosses host memory instead of going GPU to GPU.
 #    Correctness first; a wheel built against the container's UCX is what makes it fast.
-#  - STATUS: disaggregated does NOT complete a step on this cluster, and the blocker is the
-#    wheel, not this script. Everything below gets NIXL through agent creation, plan install and
-#    buffer allocation; the first weight sync then HANGS -- no error, no log, the step sits in
-#    ray.wait until Slurm kills it. That is the vendored UCX having no CUDA transport: it cannot
-#    move a GPU tensor, and says so only as the warning quoted above. Closing this needs a nixl
-#    built against the container's UCX (which does have cuda_copy/cuda_ipc). Building v1.4.0 from
-#    source was tried and fails in nixl's own logging header -- the container's glog is not the
-#    one its CI builds with -- so it is packaging work, not a knob. Use colocated meanwhile.
+#  - STATUS: disaggregated does NOT complete a step on this cluster, and WHY is still open.
+#    Everything below gets NIXL through agent creation, plan install and buffer allocation; the
+#    first weight sync then HANGS -- no error, no log, the step sits in ray.wait until Slurm
+#    kills it. Ruled out so far, each measured rather than reasoned:
+#      * missing CUDA transports in the wheel -- libuct_cuda.so and libucm_cuda.so ARE shipped
+#        (nixl_cu12.libs/ucx) and their dependencies resolve;
+#      * UCX not finding them -- ai-dynamo/nixl#1628 describes exactly that and its workaround
+#        (UCX_TLS + UCX_MODULE_DIR, both set below) does not lift the hang here;
+#      * the wheel version -- 1.3.2 behaves the same as 1.4.0;
+#      * the device list -- adding `cuda` alongside `lo` changes nothing.
+#    NIXL still logs "UCX CUDA support was not found", but that warning is NOT a reliable
+#    signal: #1628's reporter had a working setup that kept printing it. Do not chase it.
+#    Untried and cheap, in order: nixl-cu12==1.0.0 (#1628 calls it unaffected), and comparing
+#    against the environment the upstream example actually runs in (examples/run_vllm_disagg_nixl
+#    .sh points at /opt/venv/cosmos_rl with cu13 wheels -- this container is CUDA 12.8).
+#    Use colocated meanwhile; it is verified.
 #  - UCX_NET_DEVICES=lo, and this is the one that actually decides whether the run starts.
 #    Everything here is single-node, so the agent's intra-agent wireup connects to ITSELF. The
 #    shared-memory transports are all rejected for it ("no peer failure handler"), leaving tcp,
@@ -80,7 +88,8 @@ NIXL_EXTRA=${NIXL_EXTRA:-$BASE/nixl_extra}
 SCRIPT_ENV=""
 if [ "$PLACEMENT" = "disaggregated" ]; then
   SCRIPT_ENV="\"ALPAGYM_EXTRA_PYTHONPATH=$NIXL_EXTRA\""
-  SCRIPT_ENV="$SCRIPT_ENV,\"UCX_TLS=tcp,self,sm,posix,sysv\""
+  SCRIPT_ENV="$SCRIPT_ENV,\"UCX_TLS=cuda_copy,cuda_ipc,sm,tcp,self\""
+  SCRIPT_ENV="$SCRIPT_ENV,\"UCX_MODULE_DIR=$NIXL_EXTRA/nixl_cu12.libs/ucx\""
   SCRIPT_ENV="$SCRIPT_ENV,\"UCX_NET_DEVICES=lo\""
   SCRIPT_ENV="$SCRIPT_ENV,\"UCX_LOG_LEVEL=error\""
   [ -d "$NIXL_EXTRA/nixl" ] || { echo "NIXL_EXTRA=$NIXL_EXTRA has no nixl/ (see the pip line above)" >&2; exit 1; }
