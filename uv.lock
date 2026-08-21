@@ -161,6 +161,7 @@ dependencies = [
     { name = "loguru" },
     { name = "nvidia-ml-py" },
     { name = "psutil" },
+    { name = "ray" },
     { name = "termcolor" },
     { name = "torch" },
     { name = "torchao" },
@@ -185,6 +186,7 @@ requires-dist = [
     { name = "loguru" },
     { name = "nvidia-ml-py" },
     { name = "psutil" },
+    { name = "ray", specifier = ">=2.56.1,<2.57" },
     { name = "termcolor" },
     { name = "torch", specifier = "==2.8.0", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torchao", specifier = ">=0.10.0,<0.16.0" },
@@ -2066,7 +2068,7 @@ wheels = [
 
 [[package]]
 name = "ray"
-version = "2.55.1"
+version = "2.56.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -2079,7 +2081,7 @@ dependencies = [
     { name = "requests" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4c/f8/fffadf3f4285eebd460e4d7f2ed1c0cd641ed89613c3f49eb881ee9fa7e2/ray-2.55.1-cp312-cp312-manylinux2014_x86_64.whl", hash = "sha256:263705f6bab29e7622a94f82da25fd7f9cead76cdf89a07aab28f79cdf8f9d95", size = 73765203, upload-time = "2026-04-22T20:10:10.495Z" },
+    { url = "https://files.pythonhosted.org/packages/d2/7f/577a61bf2c8eff26e942afe53a6b03f4dbf5b4f233b832c228417d0c954e/ray-2.56.1-cp312-cp312-manylinux2014_x86_64.whl", hash = "sha256:e5d3173696831134c76bd09451dfe95c32d72c271253b0d6b09d2df9994aa660", size = 74194147, upload-time = "2026-07-17T21:28:50.567Z" },
 ]
 
 [package.optional-dependencies]

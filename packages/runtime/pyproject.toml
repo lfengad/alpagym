@@ -18,10 +18,15 @@ dependencies = [
   # satisfy: loguru (imaginaire.utils.log -- missing it also breaks lazy_config,
   # cosmos3.utils.parallelism and posttrain.model.parallel_dims), iopath
   # (imaginaire.lazy_config), imageio (imaginaire.utils.easy_io video handler), termcolor
-  # (cosmos-rl's WFM module discovery). `ray` is deliberately absent: cosmos-rl[rl] already
-  # brings it. `multi-storage-client` is deliberately absent too -- it would unlock i4's config
+  # (cosmos-rl's WFM module discovery). `multi-storage-client` is deliberately absent -- it would unlock i4's config
   # root but moves protobuf 4.25.9 -> 7.35.1, and AlpaGym exchanges protobuf messages with the
   # simulator on every one of an episode's 22 ticks.
+  # cosmos-rl[rl] brings `ray` transitively, but posttrain's NIXL weight plane needs a floor
+  # it does not set: `deregister_nixl_memory` (and the register/target/wait RDT surface around
+  # it) lands in 2.56.1, and `workers/nixl.py::MIN_RAY` refuses the transport below that. Held
+  # at that line rather than tracking latest: posttrain's own preflight pins 2.56.1, so a
+  # newer Ray would be a version this weight plane has not been exercised on.
+  "ray>=2.56.1,<2.57",
   "imageio",
   "iopath",
   "loguru",
