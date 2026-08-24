@@ -80,7 +80,14 @@ def episode_to_trajectory(episode: EpisodeOutput, obs: ObsBundle, traj_id: str) 
             )
         )
 
-    transitions[-1].reward = {FINAL_REWARD_KEY: float(episode.reward.total)}
+    # The terminal reward carries the episode total AND the per-term report it was summed
+    # from. Only the total feeds the advantage estimator; the terms are what say WHY an
+    # episode scored badly -- collision -10 and offroad -5 are indistinguishable in a total
+    # that merely reads "worse". The cosmos-rl packer logged them; this path dropped them.
+    transitions[-1].reward = {
+        FINAL_REWARD_KEY: float(episode.reward.total),
+        **{f"term/{name}": float(value) for name, value in episode.reward.report_metrics.items()},
+    }
     return Trajectory(
         transitions=transitions,
         id=traj_id,

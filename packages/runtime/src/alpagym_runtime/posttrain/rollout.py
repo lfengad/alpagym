@@ -268,9 +268,17 @@ class AlpagymRollout(WeightReceiverBase):
                     )
         self._weight_backend.apply_bucket_state(self.model, i, state)
 
-    def stamp_weight_version(self, version: int) -> None:
-        """Record the version, and retire the startup self-check once the first stream lands."""
-        super().stamp_weight_version(version)
+    def mark_weight_version_ready(self, version: int) -> None:
+        """Record the version, and retire the startup self-check once the first stream lands.
+
+        Hooked to `mark_weight_version_ready`, not `stamp_weight_version`: posttrain publishes a
+        version in two phases now (mark ready, then commit through a rollout-wide barrier), and
+        the old single stamp is no longer called. Left on the dead method, the self-check never
+        retires and re-runs after every later sync -- where the weights legitimately differ,
+        because a step trained them. It read as a transfer fault: `differs by 2.5e-03 before any
+        training` on a stream that was in fact correct.
+        """
+        super().mark_weight_version_ready(version)
         self._verify_sync = False
 
     def prepare_recv(self) -> dict[str, ShardSpec]:
