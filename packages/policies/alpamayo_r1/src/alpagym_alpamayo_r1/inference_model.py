@@ -173,13 +173,23 @@ class AlpamayoR1InferenceModel:
         # (scene-state dependent, not a fixed input). Re-running the prefill lands
         # finite, so re-tokenize and re-sample rather than propagate the NaN.
         if sampling.retry_on_nonfinite:
-            for attempt in range(1, 4):
+            # Eight, not three. A non-finite prefill is common enough here to reach the LAST retry
+            # on its own -- measured at roughly one non-finite sample per episode, with the third
+            # retry reached twice in a 120-episode run -- and exhausting the budget aborts the
+            # whole run, not the tick. Under three, two runs died mid-experiment; the runs that
+            # survived did so on the extra sample the `for/else` structure happens to take after
+            # the loop, which is luck rather than budget. At a ~5% per-sample rate eight
+            # consecutive failures is ~1e-10, and the cost is a few extra forwards on the rare
+            # tick that needs them.
+            attempts = 8
+            for attempt in range(1, attempts + 1):
                 pred_xyz, pred_rot = _unpack_sde_tuple(raw)[:2]
                 if torch.isfinite(pred_xyz).all() and torch.isfinite(pred_rot).all():
                     break
                 logger.warning(
-                    "Alpamayo R1 emitted a non-finite trajectory; re-running inference (%d/3).",
+                    "Alpamayo R1 emitted a non-finite trajectory; re-running inference (%d/%d).",
                     attempt,
+                    attempts,
                 )
                 helper_data = dict(data)
                 helper_data["image_frames"] = data["image_frames"].clone()
@@ -196,7 +206,9 @@ class AlpamayoR1InferenceModel:
                 # of the loop, so validate it and fail rather than emit NaN.
                 pred_xyz, pred_rot = _unpack_sde_tuple(raw)[:2]
                 if not (torch.isfinite(pred_xyz).all() and torch.isfinite(pred_rot).all()):
-                    raise ValueError("Alpamayo R1 emitted a non-finite trajectory after 3 retries.")
+                    raise ValueError(
+                        f"Alpamayo R1 emitted a non-finite trajectory after {attempts} retries."
+                    )
 
         # Normalize ExpertModelRL's SDE tuple into the batched output. ``pred_xyz``
         # stays ``(B, num_traj_sets, num_traj_samples, T, 3)``, ``pred_rot``
