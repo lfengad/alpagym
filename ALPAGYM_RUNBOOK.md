@@ -27,6 +27,12 @@ describe. posttrain additionally needs imaginaire4 checked out — see
 Note this runbook lives only on `posttrain-migration`; `main` predates it. Read it from
 here even when running the cosmos-rl mode.
 
+This file is the OPERATIONAL half: how to bring a cluster up and what to do when it breaks.
+What the posttrain entry actually does -- why the two meshes are transposed, how the loop is
+shaped, and which parts of the cosmos-rl recipe it reproduces line for line -- is
+`projects/cosmos3/posttrain/docs/alpagym.md` in imaginaire4. Neither file restates the other:
+this one cannot verify imaginaire4's internals, and that one cannot verify this cluster.
+
 ## Table of Contents
 
 - [Quick Start](#quick-start)
