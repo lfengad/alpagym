@@ -60,8 +60,15 @@ def build_wizard_srun_command(
         "--nodes=1",
         "--ntasks=1",
         f"--nodelist={host.hostname}",
-        f"--gpus-per-task={host.alpasim_gpus}",
-        f"--gpu-bind=mask_gpu:{_gpu_mask(host.alpasim_gpu_ids)}",
+        # The Wizard sees EVERY GPU on the host, and the topology config names AlpaSim's by
+        # physical id. Binding this step to AlpaSim's share instead looks tighter but is not:
+        # the Wizard only orchestrates, and each service is placed by the `srun --overlap` the
+        # Wizard itself issues -- those carry no GPU flags at all, so they inherit the whole
+        # allocation and pick a device purely from `CUDA_VISIBLE_DEVICES=<topology id>`.
+        # A mask here therefore constrains only the Wizard's own id VALIDATION (to 0..n-1 of its
+        # renumbered view) while leaving service PLACEMENT unrestricted: ids that pass the check
+        # land on the trainer's GPUs, and the ids that would land correctly are rejected.
+        f"--gpus-per-task={host.alpasim_gpus + host.cosmos_gpu_count}",
     ]
     if not slurm.exclusive:
         srun_command.append("--cpu-bind=none")
@@ -120,6 +127,8 @@ def build_cosmos_srun_command(
             _cosmos_launcher_script(
                 workspace_sync_command=workspace_sync_command,
                 worker_commands=worker_commands,
+                posttrain_repo_root=slurm.posttrain_repo_root,
+                script_env=slurm.script_env,
             ),
         ]
     )
@@ -129,15 +138,41 @@ def build_cosmos_srun_command(
 def _cosmos_launcher_script(
     workspace_sync_command: list[str],
     worker_commands: tuple[list[str], ...],
+    posttrain_repo_root: str | None = None,
+    script_env: list[str] | None = None,
 ) -> str:
     """Render the per-task dispatcher for one multi-task Cosmos Slurm step.
 
     `srun --ntasks=N` accepts one command template for the whole step, so all
     Cosmos tasks start the same shell script. Slurm assigns each task a distinct
     `SLURM_PROCID`; this wrapper uses that task id to exec the matching
-    prebuilt Cosmos launcher command.
+    prebuilt launcher command.
+
+    `PYTHONPATH` is ASSIGNED here, never appended to, and never left to the
+    environment. This runs under `bash -lc`, so the login shell has already run
+    and whatever it put on `PYTHONPATH` would otherwise win over `srun --export`.
+    A checkout leaking in that way once shadowed the pinned cosmos-rl revision.
+    Assigning the one path the entry needs -- the repo holding
+    `projects.cosmos3.posttrain`, which imports absolutely -- keeps that door shut;
+    with no root configured the variable is cleared outright.
+
+    `ALPAGYM_EXTRA_PYTHONPATH` is the ONE sanctioned way to widen it, and it is read HERE rather
+    than exported as `PYTHONPATH` because this assignment would clobber that: the disaggregated
+    placement needs NIXL's Python bindings, which live outside the venv (installed `--no-deps` so
+    they cannot shadow the torch vLLM was compiled against). Anything else on the way in is still
+    dropped.
     """
-    lines = [shlex.join(workspace_sync_command), 'case "$SLURM_PROCID" in']
+    extra = "${ALPAGYM_EXTRA_PYTHONPATH:+:$ALPAGYM_EXTRA_PYTHONPATH}"
+    lines = [
+        # BEFORE the PYTHONPATH assignment: that line expands `ALPAGYM_EXTRA_PYTHONPATH`, and a
+        # variable set afterwards expands to nothing -- the widening silently does not happen.
+        *(f"export {shlex.quote(assignment)}" for assignment in (script_env or [])),
+        f'export PYTHONPATH={shlex.quote(posttrain_repo_root)}"{extra}"'
+        if posttrain_repo_root
+        else "unset PYTHONPATH",
+        shlex.join(workspace_sync_command),
+        'case "$SLURM_PROCID" in',
+    ]
     for worker_index, worker_command in enumerate(worker_commands):
         lines.extend(
             [

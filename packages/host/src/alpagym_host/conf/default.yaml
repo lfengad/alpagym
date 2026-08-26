@@ -121,6 +121,9 @@ perf:
 
 cosmos:
   mode: colocated
+  # GPU layout of the posttrain run: colocated = every GPU carries an FSDP shard AND a rollout
+  # engine; disaggregated = trainer and rollout split the GPUs. Independent of `mode` above.
+  placement: colocated
   launch:
     policy_replicas: 1
     rollout_replicas: 1

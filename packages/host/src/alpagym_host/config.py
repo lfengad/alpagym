@@ -315,6 +315,12 @@ class CosmosRLConfig:
     """Cosmos-RL launch settings for local smoke runs."""
 
     mode: CosmosRLMode
+    # SEPARATE from `mode`, which the host pins to `disaggregated` for every Slurm run
+    # (config_validation) and pairs with `transport: nccl` in the topology presets. Both rules
+    # describe cosmos-rl's controller/worker split, which Ray replaced; neither says anything
+    # about whether posttrain's trainer and rollout share GPUs. Overloading `mode` therefore made
+    # the colocated layout unreachable under Slurm.
+    placement: CosmosRLMode
     launch: CosmosRLLaunchConfig
     train: CosmosRLTrainConfig
     policy: CosmosRLPolicyConfig
@@ -492,6 +498,21 @@ class SlurmConfig:
     uv_cache_dir: str | None = None
     container_mounts: list[str] = field(default_factory=list)
     export_env: list[str] = field(default_factory=list)
+    # Repo root for `projects.cosmos3.posttrain`, as seen INSIDE the container. The closed-loop
+    # entry lives there and imports absolutely, so it must be on PYTHONPATH.
+    #
+    # This cannot ride in `export_env`: the Cosmos step runs under `bash -lc`, and a login shell
+    # that sets PYTHONPATH wins over `srun --export`. The launcher script therefore assigns it
+    # after the login shell has run. Assignment, not prepend -- a checkout leaking in from the
+    # environment once shadowed the pinned cosmos-rl revision (see the runbook), and appending
+    # would reintroduce exactly that.
+    posttrain_repo_root: str | None = None
+    # `KEY=VALUE` exported INSIDE the Cosmos launcher script, for the same reason as
+    # `posttrain_repo_root` and one more: `srun --export` separates variables with COMMAS, so a
+    # value containing one is split into fragments that Slurm then drops as nameless. UCX needs
+    # exactly such values (`UCX_TLS=rc_mlx5,dc_mlx5,...`), and the symptom is not a parse error --
+    # the actor simply receives a truncated transport list and NIXL fails with NIXL_ERR_BACKEND.
+    script_env: list[str] = field(default_factory=list)
     qos: str | None = None
     mem: str | None = None
     # Requeue the job on the pre-timeout SIGUSR1 and resume from the latest

@@ -6,6 +6,7 @@ import signal
 from pathlib import Path
 from subprocess import CompletedProcess
 
+import pytest
 import yaml
 from alpagym_host.config import RunConfig, register_config_schema
 from alpagym_host.run_artifacts import build_artifact_paths, build_run_config
@@ -121,29 +122,22 @@ def test_execute_run_runs_local_process_lifecycle(
     assert scene_ids == {"scene_ids": ["scene_b", "scene_a"]}
     assert commands == [
         [
-            "uv",
-            "run",
-            "--all-packages",
-            "--project",
-            str(run_lifecycle.alpagym_project_root()),
-            "python",
+            # The venv's interpreter, NOT `uv run`: Ray's uv hook would otherwise rebuild every
+            # actor process with a `working_dir` runtime env, and the launcher's exported
+            # environment (UCX_TLS, LD_LIBRARY_PATH) would not reach them.
+            str(run_lifecycle.alpagym_project_root() / ".venv" / "bin" / "python"),
             "-m",
-            "cosmos_rl.launcher.launch_all",
-            "--config",
-            str(config.artifact_paths.cosmos_config_path),
-            "--policy",
-            "1",
-            "--rollout",
-            "3",
-            "--num-workers",
-            "1",
-            "--worker-idx",
+            "projects.cosmos3.posttrain.entrypoints.alpagym_clrl",
+            "--resolved-config",
+            str(config.artifact_paths.resolved_config_path),
+            "--gpus",
             "0",
-            "--port",
-            "29500",
-            "--log-dir",
-            str(config.artifact_paths.log_dir),
-            "alpagym_runtime.cosmos.entrypoint",
+            "--steps",
+            "1",
+            "--group-size",
+            "1",
+            "--placement",
+            "colocated",
         ]
     ]
     assert f"Starting Cosmos launcher command: {commands[0]}" in caplog.messages
@@ -157,11 +151,25 @@ def test_execute_run_runs_local_process_lifecycle(
     assert (log_dir / "rollout" / "rollout_0.log").read_text() == "r0"
 
 
-def test_execute_run_runs_distributed_slurm_topology(
+def test_multi_host_cosmos_is_rejected_until_ray_multinode_lands(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """Distributed Slurm starts only AlpaSim hosts as Wizards and Cosmos hosts as workers."""
+    """Multi-host Cosmos is rejected until Ray multinode lands.
+
+    This test used to assert the distributed split -- Wizards only on AlpaSim hosts, one Cosmos
+    srun spanning `--nodelist=cosmos-0,cosmos-1`, no AlpaSim host in the Cosmos command. That
+    worked because cosmos-rl addressed its workers explicitly (`--num-workers`/`--worker-idx`/
+    `--url`). The posttrain entry uses Ray instead, and standing a Ray cluster up ACROSS the
+    allocation is separate work, so multi-host is refused rather than silently run on the head
+    node alone.
+
+    KNOWN REGRESSION, deliberate and scoped: AlpaGym could run multi-node before this migration
+    and cannot now. Restoring it is the launcher work in the design's milestone 2. The AlpaSim
+    placement half of the lost coverage still lives in
+    `test_slurm_launch.py::test_build_wizard_srun_command_*`; the Cosmos-side host-split
+    assertions are gone with the capability.
+    """
     from alpagym_host import run_lifecycle
 
     uv_cache_dir = tmp_path / "uv-cache"
@@ -261,34 +269,24 @@ def test_execute_run_runs_distributed_slurm_topology(
 
     monkeypatch.setattr(run_lifecycle.subprocess, "run", fake_run)
 
-    execute_run(config)
+    with pytest.raises(NotImplementedError, match="one host"):
+        execute_run(config)
 
-    wizard_commands = [process.command for process in wizard_processes]
-    assert len(wizard_commands) == 1
-    assert "--nodelist=alpasim-0" in wizard_commands[0]
+    # The AlpaSim half still ran and was torn down: the refusal happens when the Cosmos command is
+    # built, which is after wizard bring-up, so this is not a pre-flight check.
     assert all(process.terminated for process in wizard_processes)
-    # Slurm Wizards must start their own session so cleanup's os.killpg can target them.
-    assert all(process.start_new_session is True for process in wizard_processes)
-
-    runtime_files = sorted(
-        (artifact_paths.topology_registry_dir / "alpasim_runtimes").glob("*.yaml")
-    )
-    runtime_hosts = [runtime_file.read_text(encoding="utf-8") for runtime_file in runtime_files]
-    assert len(runtime_hosts) == 1
-    assert any("host: alpasim-0" in runtime_host for runtime_host in runtime_hosts)
-    assert any("capacity: 9" in runtime_host for runtime_host in runtime_hosts)
-
-    cosmos_command = commands[1]
-    assert "--nodelist=cosmos-0,cosmos-1" in cosmos_command
-    assert "alpasim-0" not in " ".join(cosmos_command)
-    assert all("CUDA_VISIBLE_DEVICES" not in " ".join(command) for command in commands)
 
 
 def test_execute_run_requeues_on_autoresume_timeout(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """The pre-timeout SIGUSR1 tears down wizards and requeues the Slurm job."""
+    """The pre-timeout SIGUSR1 tears down wizards and requeues the Slurm job.
+
+    Runs on a single-node topology: requeue behaviour is independent of the host split, and the
+    posttrain entry rejects multi-host runs (see
+    `test_multi_host_cosmos_is_rejected_until_ray_multinode_lands`).
+    """
     from alpagym_host import run_lifecycle
 
     uv_cache_dir = tmp_path / "uv-cache"
@@ -300,7 +298,7 @@ def test_execute_run_requeues_on_autoresume_timeout(
             overrides=[
                 f"run_root={tmp_path.as_posix()}",
                 "deploy=local",
-                "topology=slurm_distributed_1_1_1",
+                "topology=slurm_full_node_1_3_4",
                 "policy.model.kind=alpamayo_r1",
                 f"policy.model.path={model_path.as_posix()}",
                 "execution.slurm.partition=batch",
@@ -321,7 +319,7 @@ def test_execute_run_requeues_on_autoresume_timeout(
 
     monkeypatch.setenv("SLURM_JOB_ID", "424242")
     monkeypatch.setattr(
-        run_lifecycle, "allocated_hostnames", lambda: ["cosmos-0", "cosmos-1", "alpasim-0"]
+        run_lifecycle, "allocated_hostnames", lambda: ["node-0"]
     )
     monkeypatch.setattr(
         run_lifecycle, "resolve_alpasim_checkout", lambda config: tmp_path / "alpasim"
@@ -499,3 +497,30 @@ def _write_model_bundle_dir(tmp_path: Path) -> Path:
     (bundle_dir / "config.json").write_text("{}", encoding="utf-8")
     (bundle_dir / "model.safetensors").write_text("weights", encoding="utf-8")
     return bundle_dir
+
+
+def test_container_run_execs_the_interpreter_uv_project_environment_names() -> None:
+    """Under Slurm the command must exec the CONTAINER venv, not the host checkout's `.venv`.
+
+    `UV_PROJECT_ENVIRONMENT` in `export_env` is what `uv sync` obeys, so it is the only thing that
+    says where the synced interpreter actually is. Deriving the path from anywhere else -- a
+    literal, or the project root -- gives a python that either does not exist or has none of the
+    run's dependencies, and the failure surfaces inside a Slurm step as a bare ImportError.
+    """
+    from types import SimpleNamespace
+
+    from alpagym_host import run_lifecycle
+
+    config = SimpleNamespace(
+        execution=SimpleNamespace(
+            slurm=SimpleNamespace(export_env=["FOO=bar", "UV_PROJECT_ENVIRONMENT=/opt/venv"])
+        )
+    )
+    assert run_lifecycle._venv_python(config, Path("/host/checkout")) == Path(
+        "/opt/venv/bin/python"
+    )
+
+    config.execution.slurm.export_env = ["FOO=bar"]
+    assert run_lifecycle._venv_python(config, Path("/host/checkout")) == Path(
+        "/host/checkout/.venv/bin/python"
+    )
